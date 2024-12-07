@@ -57,7 +57,7 @@ require("GBIFhandleR")
 if (Sys.info()["sysname"] == "Windows") {
   dir_main <- "C:/Users/poppman/switchdrive/PhD/prj/bir/git/BiomeInvasibility"
 } else {
-  dir_main <- "/lud11/poppman"
+  dir_main <- "/lud11/poppman/BiomeInvasibility"
 }
 
 dir_dat <- file.path(dir_main, "dat")
