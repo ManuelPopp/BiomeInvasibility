@@ -89,13 +89,13 @@ download <- function(species_name) {
 #>----------------------------------------------------------------------------<|
 #> Read species list
 species <- read.csv(file.path(dir_dat, f_species)) %>%
-  dplyr::select(col_spnames) %>%
-  as.vector()
+  dplyr::pull(col_spnames)
 
 for (i in 1:length(species)) {
   species_name <- species[i]
   cat(
-    "Downloading species", i, "of", length(species), paste0("(", species, ").")
+    "Downloading species", i, "of", length(species),
+    paste0("(", species_name, ").")
     )
   
   download(species_name)
