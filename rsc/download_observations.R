@@ -82,7 +82,7 @@ download <- function(species_name) {
   
   if (!file.exists(dst)) {
     observations <- GBIFhandleR::get_observations(species_name)
-    write.csv2(dst)
+    write.csv(observations, file = dst, row.names = FALSE)
   }
 }
 
