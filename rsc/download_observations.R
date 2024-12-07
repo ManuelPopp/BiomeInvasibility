@@ -82,7 +82,7 @@ download <- function(species_name) {
   
   if (!file.exists(dst)) {
     observations <- GBIFhandleR::get_observations(species_name)
-    write.csv(observations, file = dst, row.names = FALSE)
+    write.csv(observations$data, file = dst, row.names = FALSE)
   }
 }
 
@@ -95,7 +95,7 @@ for (i in 1:length(species)) {
   species_name <- species[i]
   cat(
     "Downloading species", i, "of", length(species),
-    paste0("(", species_name, ").")
+    paste0("(", species_name, ").\n")
     )
   
   download(species_name)
