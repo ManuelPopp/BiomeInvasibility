@@ -1,8 +1,8 @@
 #!/usr/bin/env Rscript
 #>------------------------------------<
 ##
-## Script name: Download species
-## occurence data
+## Script name: Clean coordinates
+##
 ##
 ## Author: Manuel R. Popp
 ## Email: manuel.popp@wsl.ch
@@ -11,7 +11,7 @@
 ##
 ## ---------------------------
 ##
-## Descripton: Download species observations from GBIF
+## Descripton: Remove bad coordinates from species occurence data
 ## Notes: -
 ##
 #>----------------------------------------------------------------------------<|
@@ -56,50 +56,45 @@ require("GBIFhandleR")
 #> Settings
 if (Sys.info()["sysname"] == "Windows") {
   dir_main <- "C:/Users/poppman/switchdrive/PhD/prj/bir/git/BiomeInvasibility"
+  dir_main <- "L:/poppman/BiomeInvasibility"
 } else {
   dir_main <- "/lud11/poppman/BiomeInvasibility"
 }
 
 dir_dat <- file.path(dir_main, "dat")
 dir_obs <- file.path(dir_dat, "obs")
-
-f_species <- "species_names.csv"
-col_spnames <- "Accepted_SPNAME"
-
-# Set up directory for output
-dir.create(dir_obs, showWarnings = FALSE)
-
-if (!file.exists(file.path(dir_main, ".gitignore.txt"))) {
-  sink(file.path(dir_main, ".gitignore.txt"))
-  print("dat/obs")
-  sink()
-}
+dir_cleaned <- file.path(dir_obs, "cleaned")
 
 #>----------------------------------------------------------------------------<|
 #> Functions
-download <- function(species_name) {
-  dst <- file.path(dir_obs, paste0(species_name, ".csv"))
+clean_files <- function(
+    directory, out_dir, out_name = "cleaned_observations", one_file = TRUE
+    ) {
+  files <- list.files(path = directory, pattern = ".csv", full.names = TRUE)
+  cleaned <- lapply(
+    X = files, FUN = function(x) {
+      df <- read.csv(x, header = TRUE)
+      return(GBIFhandleR::clean_coords(df))
+      }
+    )
 
-  if (!file.exists(dst)) {
-    observations <- GBIFhandleR::get_observations(
-      species_name,
-      basisOfRecord = c("OBSERVATION", "HUMAN_OBSERVATION")
+  names(cleaned) <- basename(files)
+
+  if (one_file) {
+    cleaned_output <- do.call(rbind, cleaned)
+    write.csv(
+      cleaned_output, file = file.path(out_dir, paste0(out_name, ".csv"))
       )
-    write.csv(observations$data, file = dst, row.names = FALSE)
+  } else {
+    for (ds in cleaned) {
+      write.csv(ds, file = file.path(out_dir, name(ds)))
+    }
   }
 }
 
 #>----------------------------------------------------------------------------<|
-#> Read species list
-species <- read.csv(file.path(dir_dat, f_species)) %>%
-  dplyr::pull(col_spnames)
-
-for (i in 1:length(species)) {
-  species_name <- species[i]
-  cat(
-    "Downloading species", i, "of", length(species),
-    paste0("(", species_name, ").\n")
-    )
-
-  download(species_name)
-}
+#> Main
+clean_files(
+  directory = dir_obs,
+  out_dir = dir_cleaned
+  )
