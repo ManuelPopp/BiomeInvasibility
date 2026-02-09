@@ -66,7 +66,7 @@ if (Sys.info()["sysname"] == "Windows") {
 
 dir_lud <- file.path(dir_dat, "lud11")
 dir_obs <- file.path(dir_lud, "obs")
-dir_cleaned <- file.path(dir_lud, "cln")
+dir_cleaned <- "D:/tmp" #file.path(dir_lud, "cln")
 dir_git_dat <- "C:/Users/poppman/switchdrive/PhD/prj/bir/git/BiomeInvasibility/dat"
 
 #>----------------------------------------------------------------------------<|
@@ -100,25 +100,38 @@ clean_files <- function(
         if (quiet) {
           out <- suppressMessages(
             suppressWarnings(
-              capture.output(
-                GBIFhandleR::clean_coords(
+              {
+                tmp <- GBIFhandleR::clean_coords(
                   df, ref_urban = ref_urban, ref_sea = ref_sea,
                   species_column = "acceptedScientificName"
-                  ),
-                file = ifelse(
-                  Sys.info()["sysname"] == "Windows", "C:/NUL", "/dev/null"
-                  )
                 )
+                capture.output(
+                  tmp,
+                  file = ifelse(
+                    Sys.info()["sysname"] == "Windows", "C:/NUL", "/dev/null"
+                    )
+                  )
+                tmp
+              }
             )
           )
         } else {
           out <- GBIFhandleR::clean_coords(
-            df, ref_urban = ref_urban, ref_sea = ref_sea
+            df, ref_urban = ref_urban, ref_sea = ref_sea,
+            species_column = "acceptedScientificName"
           )
           }
         } else {
           out <- df
         }
+      
+      if (!one_file) {
+        write.csv(
+          out, file = file.path(out_dir, sub(".rds", ".csv", basename(file)))
+          )
+        utils::setTxtProgressBar(pb, i)
+        return(NA)
+      }
       utils::setTxtProgressBar(pb, i)
       return(out)
       }
@@ -136,16 +149,15 @@ clean_files <- function(
     write.csv(
       cleaned_output, file = file.path(out_dir, paste0(out_name, ".csv"))
       )
-  } else {
-    for (i in 1:length(cleaned)) {
-      write.csv(cleaned[[i]], file = file.path(out_dir, names(cleaned)[i]))
-    }
   }
+  
   return(num_records)
 }
 
 #>----------------------------------------------------------------------------<|
 #> Main
+overwrite <- FALSE
+
 species_table <- read.csv(file.path(dir_git_dat, "matching_species.csv")) %>%
   dplyr::mutate(
     path = file.path(
@@ -153,7 +165,19 @@ species_table <- read.csv(file.path(dir_git_dat, "matching_species.csv")) %>%
     )
   )
 
+paths <- species_table$path
+if (overwrite) {
+  paths_new <- paths
+  } else {
+    paths_new <- paths[
+      which(
+        !file.exists(file.path(dir_cleaned, sub(".rds", ".csv", basename(paths))))
+        )
+      ]
+  }
+
 num_records <- clean_files(
-  files = species_table$path,
+  files = paths_new,
   out_dir = dir_cleaned
   )
+
