@@ -42,21 +42,34 @@ biome_names <- c(
   "Mangrove"
 )
 
-dir_main <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir"
-dir_dat <- file.path(dir_main, "dat")
+if (Sys.info()["sysname"] == "Windows") {
+  dir_main <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir"
+  dir_tmp <- "L:/poppman/tmp"
+} else {
+  dir_main <- "/lud11/poppman/data/bir"
+  dir_tmp <- "/lud11/poppman/tmp"
+}
+
+dir_dat <- file.path(dir_main, "dat", "lud11")
 dir_stats <- file.path(dir_main, "stats")
 f_glm_stats <- file.path(dir_stats, "glm_summaries.txt")
-f_mountains <- "L:/poppman/data/bir/dat/lud11/shp/GMBA_Inventory_v2.0_standard/GMBA_Inventory_v2.0_standard.shp"
-f_bathymetrie <- "L:/poppman/data/bir/dat/lud11/gebco_2025_geotiff/gebco.gpkg"
+f_mountains <- file.path(
+  dir_main, "dat", "lud11",
+  "shp", "GMBA_Inventory_v2.0_standard", "GMBA_Inventory_v2.0_standard.shp"
+  )
+f_bathymetrie <- file.path(
+  dir_main, "dat", "lud11",
+  "gebco_2025_geotiff", "gebco.gpkg"
+  )
 
 #>=============================================================================<
 #> Data preparation
 #<=============================================================================>
 
-rsdd::dataset(2)
+rsdd::dataset("gbif-powo_raw")
 
-f_sinas_places <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/dat/sinas/SInAS_Locations"
-f_sinas_data <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/dat/sinas/SInAS_3.1.1.csv"
+f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_Locations")
+f_sinas_data <- file.path(dir_dat, "sinas", "SInAS_3.1.1.csv")
 
 sinas_places <- terra::vect(
   f_sinas_places
@@ -99,19 +112,17 @@ if (file.exists(f_bbuff) & !recompute) {
       filename = f_bbuff,
       overwrite = TRUE
     )
-  ## Copy the result to network drive to make it available on the cluster
-  file.copy(f_bbuff, "L:/poppman/tmp/biomes_buff.gpkg")
   biomes_buff <- terra::vect(f_bbuff)
 }
 
 ## Create a version of biomes without mountains to get their lowland area
 f_berased <- file.path(dir_dat, "biomes", "biomes_wout_mountains.gpkg")
-if (file.exists(f_bbuff) & !recompute) {
+if (file.exists(f_berased) & !recompute) {
   biomes_erased <- terra::vect(f_berased)
 } else {
   ## Load original biome file (contiguous biome areas in Olson, 2002)
   biomes <- terra::vect(
-    file.path(dir_dat, "biomes/biomes.shp")
+    file.path(dir_dat, "biomes", "biomes.shp")
   )
   
   biomes$ID <- seq(1:nrow(biomes))
@@ -128,11 +139,11 @@ if (file.exists(f_bbuff) & !recompute) {
 }
 
 f_bfullinfo <- file.path(dir_dat, "biomes", "biomes_full_info.gpkg")
-if (file.exists(f_bbuff) & !recompute) {
+if (file.exists(f_bfullinfo) & !recompute) {
   biomes <- terra::vect(f_bfullinfo)
 } else {
   biomes <- terra::vect(
-    file.path(dir_dat, "biomes/biomes.shp")
+    file.path(dir_dat, "biomes", "biomes.shp")
   )
   biomes$ID <- seq(1:nrow(biomes))
   biomes$total_area <- terra::expanse(biomes)
@@ -157,7 +168,7 @@ if (file.exists(f_bbuff) & !recompute) {
 }
 
 # Get biome patch connectivity
-if (recompute) {
+if (!"dECA" %in% names(biomes) | recompute) {
   for (biome_id in unique(biomes$BIOME)) {
     cmd <- paste("Rscript get_dECA.R", biome_id)
     system(cmd)
@@ -166,7 +177,11 @@ if (recompute) {
   dat <- do.call(
     rbind,
     lapply(
-      X = list.files("L:/poppman/tmp/dECA", pattern = ".csv", full.names = TRUE),
+      X = list.files(
+        file.path(dir_tmp, "dECA"),
+        pattern = ".csv",
+        full.names = TRUE
+        ),
       FUN = read.csv
     )
   ) %>%
@@ -190,8 +205,9 @@ if (recompute) {
   )
 }
 
-# Add species richness estimates
-f_est_div <- file.path("L:/poppman/tmp", "biome_species_richness.csv")
+#>-----------------------------------------------------------------------------<
+#> Add species richness estimates
+f_est_div <- file.path(dir_tmp, "biome_species_richness.csv")
 est_div <- read.csv(f_est_div) %>%
   dplyr::rename(ID = biomePatchID)
 
@@ -261,17 +277,14 @@ assign_patches <- function(taxon) {
     return(data.frame())
   }
   
-  rst <- rsdd::get_taxon(rsdd_taxon, format = "SpatRaster")
+  obs <- rsdd::get_taxon(
+    rsdd_taxon, status = "all", # Here, we use all observations to employ the SINaS native/Exotic definitions
+    format = "centroids"
+    ) %>%
+    terra::vect(geom = c("x", "y"), crs = "epsg:4326")
   
-  native_obs <- terra::mask(
-    rst, mask = native
-  ) %>%
-    terra::as.points()
-  
-  introduced_obs <- terra::mask(
-    rst, introduced
-  ) %>%
-    terra::as.points()
+  native_obs <- terra::intersect(obs, native)
+  introduced_obs <- terra::intersect(obs, introduced)
   
   if (length(native_obs) < 5 | length(introduced_obs) < 5) {
     return(data.frame())
@@ -348,7 +361,7 @@ assign_patches <- function(taxon) {
 specs <- unique(sinas_data$taxon)
 #specs <- sample(specs, size = 20000)
 
-f_out <- file.path(dir_dat, "df_area.csv")
+f_out <- file.path(dir_dat, "df_species_patches.csv")
 if (file.exists(f_out) & !recompute) {
   df_species_patches <- read.csv(f_out)
 } else {
