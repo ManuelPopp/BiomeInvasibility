@@ -35,9 +35,9 @@ if (!file.exists(f_native)) {
 }
 
 # Load the buffered biomes and rasterise them to get biome IDs per cell
+bbuff <- terra::vect(f_bbuff)
+bbuff$ID <- 1:nrow(bbuff)
 if (!file.exists(f_native_rastid)) {
-  bbuff <- terra::vect(f_bbuff)
-  bbuff$ID <- 1:nrow(bbuff)
   map <- terra::rast(f_template)
   bbuffr <- terra::rasterize(
     bbuff,
