@@ -9,15 +9,15 @@
 #<=============================================================================>
 
 print(Sys.time())
-library(rsdd)
-library(terra)
-library(tidyterra)
-library(pbapply)
-library(ggplot2)
-library(viridis)
-library(dplyr)
-library(tidyr)
-library(progress)
+library("rsdd")
+library("terra")
+library("tidyterra")
+library("ggplot2")
+library("viridis")
+library("dplyr")
+library("tidyr")
+library("future.apply")
+library("progressr")
 
 #>=============================================================================<
 #> Settings
@@ -359,31 +359,125 @@ assign_patches <- function(taxon) {
 
 
 specs <- unique(sinas_data$taxon)
-#specs <- sample(specs, size = 20000)
+
+# just to check how many names can be matched somehow
+# check_avail <- function(taxon) {
+#   taxon_species_lvl <- paste(
+#     strsplit(taxon, split = " ")[[1]][c(1, 2)],
+#     collapse = " "
+#   )
+#   if (taxon %in% tax_avail) {
+#     return(1)
+#   } else if (taxon_species_lvl %in% tax_avail) {
+#     return(1)
+#   } else {
+#     return(0)
+#   }
+# }
+# n_avail <- sum(unlist(lapply(X = specs, FUN = check_avail)))
+
 
 f_out <- file.path(dir_dat, "df_species_patches.csv")
 if (file.exists(f_out) & !recompute) {
   df_species_patches <- read.csv(f_out)
 } else {
+  progressr::handlers(global = TRUE)
+  progressr::handlers("progress")
+  future::plan(future::multicore)
   Sys.time()
-  df_species_patches <- do.call(
-    rbind,
-    pbapply::pblapply(
-      X = specs,
-      FUN = function(spec) {
-        tryCatch(
-          assign_patches(spec),
-          error = function(e) {
-            stop(paste("Error for species", spec, ":", e$message))
-          }
-        )
-      }
+  progressr::with_progress({
+    p <- progressr::progressor(along = specs)
+    df_species_patches <- dplyr::bind_rows(
+      future.apply::future_lapply(
+        X = specs,
+        FUN = function(spec) {
+          tryCatch(
+            {
+              res <- assign_patches(spec)
+              p()
+              res
+            },
+            error = function(e) {
+              message(paste("Error for species", spec, ":", e$message))
+              NULL
+            }
+          )
+        }
+      )
     )
-  )
+  })
   
   write.csv(df_species_patches, file = f_out, row.names = FALSE)
 }
 
+#>=============================================================================<
+#> Add GIST status for the most invasive species
+#<=============================================================================>
+gisd_codes <- c("MV", "MR", "MO", "MN", "MC")
+gisd_levels <- c("Massive", "Major", "Moderate", "Minor", "Minimal concern")
+gisd <- read.csv(
+  file.path(dir_dat, "db", "gisd_2026-02-25", "converted.csv")
+) %>%
+  dplyr::filter(EICAT.Category %in% gisd_codes) %>%
+  dplyr::mutate(
+    Countries.of.impact = dplyr::recode(
+      Countries.of.impact, "Ethiopa" = "Ethiopia"
+    )
+  )
+
+worst <- read.csv(
+  file.path(dir_dat, "db", "gisd_2026-02-25", "100_of_the_Worlds_Worst.csv")
+  )$Species
+
+check_gist <- function(taxon, biome_patch_id) {
+  if (taxon %in% gisd$Species) {
+    locations <- sinas_places[
+      which(
+        terra::is.related(
+          sinas_places,
+          biomes[which(biomes$ID == biome_patch_id),],
+          relation = "intersects"
+        )
+      ),
+    ]$Location
+    
+    categories <- gisd[
+      gisd$Countries.of.impact %in% locations & gisd$Species == taxon,
+    ]$EICAT.Category
+    if (length(categories) < 1) {
+      return(NA)
+    }
+    if (length(categories) == 1) {
+      categories
+    }
+    return(min(match(categories, gisd_codes)))
+  } else {
+    return(NA)
+  }
+}
+
+
+df_species_patches <- df_species_patches %>%
+  dplyr::rowwise() %>%
+  dplyr::mutate(gisd_impact_level = check_gist(Species, PatchID)) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    gist_impact_label = ifelse(
+      is.na(gisd_impact_level),
+      "Not evaluated",
+      gisd_levels[gisd_impact_level]
+    )
+  ) %>%
+  dplyr::mutate(
+    gist_impact_label = factor(
+      gist_impact_label, levels = c(gisd_levels, "Not evaluated")
+      ),
+    gist_100_worst = Species %in% worst
+  )
+
+#>=============================================================================<
+#> Merge with biome patch information
+#<=============================================================================>
 merged <- terra::merge(
   dplyr::rename(df_species_patches, ID = PatchID),
   as.data.frame(biomes),
@@ -405,6 +499,66 @@ merged <- terra::merge(
 
 merged$Biome <- factor(merged$Biome)
 merged$clusterID <- factor(merged$clusterID)
+
+# Plot
+ggdf <- merged |>
+  dplyr::filter(Status == "Receiver") |>
+  dplyr::add_count(gist_impact_label, name = "N") |>
+  dplyr::mutate(
+    gist_label_N = paste0(gist_impact_label, "\nN = ", N),
+    gist_label_N = factor(
+      gist_label_N,
+      levels = paste0(
+        levels(gist_impact_label),
+        "\nN = ",
+        tapply(N, gist_impact_label, unique)
+        )
+      )
+    )
+
+gg_gist <- ggplot2::ggplot(
+  data = ggdf,
+  ggplot2::aes(x = gist_label_N, y = log(lowland_area_km2), fill = gist_impact_label)
+) +
+  ggplot2::geom_boxplot() +
+  ggplot2::xlab("GIST impact class") +
+  ggplot2::theme_bw() +
+  ggplot2::scale_fill_manual(
+    values = c("firebrick3", "coral3", "lightsalmon3", "darkgoldenrod3", "slateblue3")
+    ) +
+  ggplot2::theme(legend.position = "none")
+
+ggplot2::ggsave(
+  filename = file.path(dir_main, "fig", "BoxplotGISDclasses.svg"),
+  plot = gg_gist,
+  width = 7, height = 5
+)
+
+
+gg_gist_worst <- ggplot2::ggplot(
+  data = ggdf,
+  ggplot2::aes(x = gist_100_worst, y = log(lowland_area_km2), fill = gist_100_worst)
+) +
+  ggplot2::geom_boxplot() +
+  ggplot2::xlab("GIST assessment") +
+  ggplot2::theme_bw() +
+  ggplot2::scale_x_discrete(
+    labels = c(
+      "TRUE" = "GIST 100 worst",
+      "FALSE" = "Other"
+    )
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c("firebrick3", "slateblue3")
+  ) +
+  ggplot2::theme(legend.position = "none")
+
+
+ggplot2::ggsave(
+  filename = file.path(dir_main, "fig", "BoxplotGISD100worst.svg"),
+  plot = gg_gist_worst,
+  width = 5, height = 5
+)
 
 #>=============================================================================<
 #> Plot maps and boxplots
@@ -531,7 +685,7 @@ stats <- test_res %>%
     label = paste0(
       "W = ", statistic,
       "\n", "p = ", signif(p, 3),
-      "\n", "r = ", round(effsize, 2)
+      "\n", "effect size = ", round(effsize, 2)
     ),
     y.position = max_value,
     .y. = "value"
@@ -547,7 +701,7 @@ stats <- test_res %>%
   dplyr::mutate(value = y.position)
 
 ## Simple boxplots by Status (facetted by metric)
-ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Status)) +
+gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Status)) +
   ggplot2::geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
   ggplot2::facet_wrap(
     ~ metric, scales = "free_y",
@@ -579,12 +733,18 @@ ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Status)) +
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(x = 1.5, label = label),
-    vjust = 7
+    vjust = 6
     ) +
   ggplot2::scale_y_continuous(
     breaks = c(1e-2, 1, 1e2, 1e4),
     labels = scales::label_scientific()
   )
+
+ggplot2::ggsave(
+  filename = file.path(dir_main, "fig", "MaxLowlandAreaBoxplot.svg"),
+  plot = gg_area,
+  width = 13, height = 3
+)
 
 #>=============================================================================<
 #> Add sPlot data
