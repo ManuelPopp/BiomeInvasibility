@@ -6,6 +6,7 @@ library("dplyr")
 library("tidyr")
 library("terra")
 library("nanoparquet")
+library("vegan")
 
 # Set file paths
 f_bbuff <- file.path(lud11, "poppman/Europe", "Europe_merged.shp")
