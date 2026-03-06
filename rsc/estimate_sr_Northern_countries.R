@@ -1,3 +1,6 @@
+lud11 <- ifelse(Sys.info()["sysname"] == "Windows", "L:", "/lud11")
+#install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+library("rsdd") 
 library("dplyr")
 library("tidyr")
 library("terra")
@@ -6,18 +9,23 @@ library("GIFT")
 library("ggplot2")
 library("nortest")
 library("rnaturalearth")
+library("vegan")
+library("ggrepel")
+library("breakaway")
 
 # Set file paths
-f_template <- "/lud11/nobis/Manuel/gbif/data/map_template.tif"
-f_taxa <- "/lud11/nobis/Manuel/gbif/data/map_taxa.parquet"
-f_cells <- "/lud11/nobis/Manuel/gbif/data/map_cells.parquet"
-dir_out <- "/lud11/poppman/tmp"
+f_template <- file.path(lud11, "nobis/Manuel/gbif/data/map_template.tif")
+f_taxa <- file.path(lud11, "nobis/Manuel/gbif-powo_raw_specID-cellID-occN.parquet")
+f_native <- file.path(
+  lud11, "poppman", "data", "bir", "dat", "lud11", "native_obs.parquet"
+)
+f_native_rastid <- file.path(
+  lud11, "poppman", "data", "bir", "dat", "lud11", "native_obs_North.parquet"
+)
 
-# Load taxa and frequency table
-taxa <- nanoparquet::read_parquet(f_taxa)
-freq_tab <- data.frame(nanoparquet::read_parquet(f_cells))
-colnames(freq_tab) <- c("row","specID", "cellID", "freq")
-freq_tab$cellID <- as.numeric(freq_tab$cellID)
+rsdd::dataset("gbif-powo_raw")
+taxon_tab <- rsdd::taxa()
+dir_out <- "/lud11/poppman/tmp"
 
 # Load GIFT countries and rasterise them to get country IDs per cell
 gift_shapes <- GIFT::GIFT_shapes()
@@ -30,15 +38,51 @@ countries <- gift_shapes %>%
   terra::vect()
 
 countries$ID <- 1:nrow(countries)
-map <- terra::rast(f_template)
-countries_rst <- terra::rasterize(countries, map, field = "ID")
 
-# Join country IDs to frequency table
-country_ids <- terra::as.data.frame(countries_rst, xy = FALSE, cells = TRUE)
-colnames(country_ids) <- c("cellID", "countryID")
-freq_tab <- base::merge(freq_tab, country_ids, by = "cellID")
+# Load frequency table
+if (!file.exists(f_native)) {
+  ftab <- nanoparquet::read_parquet(f_taxa)
+  colnames(ftab) <- c("specID", "cellID", "freq")
+  obs_tab <- merge(ftab, rsdd:::ds_cells, by = c("specID", "cellID")) %>%
+    dplyr::filter(native == TRUE) %>%
+    dplyr::select(specID, cellID, freq)
+  nanoparquet::write_parquet(obs_tab, f_native)
+  gc()
+} else {
+  obs_tab <- nanoparquet::read_parquet(f_native)
+}
 
-# Estimate species richness per country
+
+# Load the countries and rasterise them to get biome IDs per cell
+
+if (!file.exists(f_native_rastid)) {
+  map <- terra::rast(f_template)
+  countries_rst <- terra::rasterize(
+    countries,
+    map,
+    field = "ID",
+    filename = file.path(
+      lud11, "poppman", "data", "bir", "dat", "lud11", "NorthernCountries.tif"
+    ),
+    overwrite = TRUE,
+    background = NA
+  )
+  
+  # Join biome IDs to frequency table
+  country_ids <- terra::as.data.frame(countries_rst, xy = FALSE, cells = TRUE)
+  colnames(country_ids) <- c("cellID", "countryID")
+  freq_tab <- base::merge(obs_tab, country_ids, by = "cellID")
+  nanoparquet::write_parquet(freq_tab, f_native_rastid)
+  gc()
+} else {
+  freq_tab <- nanoparquet::read_parquet(f_native_rastid)
+  countries_rst <- terra::rast(
+    file.path(
+      lud11, "poppman", "data", "bir", "dat", "lud11", "NorthernCountries.tif"
+    )
+  )
+}
+
 # Estimate species richness per country
 ## Helper function to safely convert to numeric
 as.num <- function(x) {
@@ -58,25 +102,35 @@ as.num <- function(x) {
 ## Function to estimate species richness for a given country ID
 get_species_richness <- function(country_id) {
   sub_tab <- freq_tab[freq_tab$countryID == country_id, ]
-
+  
   if (nrow(sub_tab) == 0) {
     return(
-        data.frame(
-            ID = country_id,
-            speciesRichnessBa = NA,
-            speciesRichnessBaSE = NA,
-            speciesRichnessChao1 = NA,
-            speciesRichnessChao1SE = NA,
-            speciesRichnessACE = NA,
-            speciesRichnessACESE = NA,
-            speciesRichnessChao2 = NA
-            )
-        )
-    }
-
+      data.frame(
+        ID = country_id,
+        speciesRichnessBa = NA,
+        speciesRichnessBaSE = NA,
+        speciesRichnessChao1 = NA,
+        speciesRichnessChao1SE = NA,
+        speciesRichnessACE = NA,
+        speciesRichnessACESE = NA,
+        speciesRichnessChao2 = NA,
+        speciesRichnessBaCC = NA,
+        speciesRichnessChao1CC = NA,
+        speciesRichnessACECC = NA
+      )
+    )
+  }
+  
+  # Based on total observation counts
   obs_counts <- sub_tab %>%
     dplyr::group_by(specID) %>%
     dplyr::summarise(counts = sum(freq)) %>%
+    dplyr::pull(counts)
+  
+  # Based on occupied cell counts
+  cell_counts <- sub_tab %>%
+    dplyr::group_by(specID) %>%
+    dplyr::summarise(counts = dplyr::n()) %>%
     dplyr::pull(counts)
   
   baway <- tryCatch(
@@ -84,16 +138,23 @@ get_species_richness <- function(country_id) {
     error = function(e) list(est = NA, se = NA)
   )
   
+  bawayCC <- tryCatch(
+    breakaway::breakaway(cell_counts),
+    error = function(e) list(est = NA, se = NA)
+  )
+  
   chao1 <- vegan::estimateR(obs_counts)
+  chao1CC <- vegan::estimateR(cell_counts)
   
   inc_freq <- sub_tab %>%
     dplyr::distinct(cellID, specID) %>%
     dplyr::count(specID, name = "inc")
+  
   Q1 <- sum(inc_freq$inc == 1)
   Q2 <- sum(inc_freq$inc == 2)
   n  <- dplyr::n_distinct(sub_tab$cellID)
   S_obs <- nrow(inc_freq)
-
+  
   if (Q2 > 0) {
     chao2 <- S_obs + (Q1^2) / (2 * Q2)
   } else {
@@ -108,8 +169,12 @@ get_species_richness <- function(country_id) {
     speciesRichnessChao1SE = as.num(chao1["se.chao1"]),
     speciesRichnessACE = as.num(chao1["S.ACE"]),
     speciesRichnessACESE = as.num(chao1["se.ACE"]),
-    speciesRichnessChao2 = as.num(chao2)
-    )
+    speciesRichnessChao2 = as.num(chao2),
+    speciesRichnessBaCC = as.num(bawayCC$est),
+    speciesRichnessChao1CC = as.num(chao1CC["S.chao1"]),
+    speciesRichnessACECC = as.num(chao1CC["S.ACE"])
+  )
+  gc()
   return(df)
 }
 

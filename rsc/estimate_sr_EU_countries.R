@@ -61,8 +61,7 @@ if (!file.exists(f_native_rastid)) {
   freq_tab <- nanoparquet::read_parquet(f_native_rastid)
 }
 
-# Estimate species richness per biome
-# Estimate species richness per biome
+# Estimate species richness per country
 ## Helper function to safely convert to numeric
 as.num <- function(x) {
   x <- as.numeric(x)
