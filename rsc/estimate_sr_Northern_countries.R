@@ -25,7 +25,7 @@ f_native_rastid <- file.path(
 
 rsdd::dataset("gbif-powo_raw")
 taxon_tab <- rsdd::taxa()
-dir_out <- "/lud11/poppman/tmp"
+dir_out <- file.path(lud11, "poppman", "tmp")
 
 # Load GIFT countries and rasterise them to get country IDs per cell
 gift_shapes <- GIFT::GIFT_shapes()
@@ -195,6 +195,8 @@ results_df <- do.call(
       )
     )
 
+save(results_df, file = file.path(dir_out, "species_richness_Northern.RData"))
+
 # Add GIFT species counts
 countries$GIFT <- NA
 for (i in 1:nrow(countries)) {
@@ -208,8 +210,6 @@ for (i in 1:nrow(countries)) {
   )
   countries$GIFT[i] <- length(unique(taxa$checklists$work_species))
 }
-
-save(results_df, file = file.path(dir_out, "species_richness_Northern.RData"))
 
 countries_df <- as.data.frame(countries)
 save(
@@ -285,6 +285,14 @@ r2_tab_ctnt <- df_long %>%
     r2 = summary(lm(Estimate ~ GIFT))$r.squared,
     .groups = "drop"
   )
+
+continent_best_mean <- r2_tab_ctnt %>%
+  dplyr::group_by(Method) %>%
+  dplyr::summarise(meanR2 = mean(r2)) %>%
+  dplyr::filter(meanR2 == max(meanR2)) %>%
+  dplyr::pull(Method)
+
+overall_highest <- r2_tab_ctnt[r2_tab_ctnt$Method == continent_best_mean,]
 
 df_long <- df_long %>%
   dplyr::group_by(Method) %>%

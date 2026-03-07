@@ -1,31 +1,66 @@
-library(dplyr)
-library(tidyr)
-library(terra)
-library(nanoparquet)
+lud11 <- ifelse(Sys.info()["sysname"] == "Windows", "L:", "/lud11")
+#install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+library("rsdd") 
+library("dplyr")
+library("tidyr")
+library("terra")
+library("nanoparquet")
+library("vegan")
+library("breakaway")
 
 # Set file paths
-f_bbuff <- file.path("/lud11/poppman/tmp", "biomes_buff.gpkg")
-f_template <- "/lud11/nobis/Manuel/gbif/data/map_template.tif"
-f_taxa <- "/lud11/nobis/Manuel/gbif/data/map_taxa.parquet"
-f_cells <- "/lud11/nobis/Manuel/gbif/data/map_cells.parquet"
+f_bbuff <- file.path(lud11, "poppman/tmp", "biomes_buff.gpkg")
+f_template <- file.path(lud11, "nobis/Manuel/gbif/data/map_template.tif")
+f_taxa <- file.path(lud11, "nobis/Manuel/gbif-powo_raw_specID-cellID-occN.parquet")
+f_native <- file.path(
+  lud11, "poppman", "data", "bir", "dat", "lud11", "native_obs.parquet"
+)
+f_native_rastid <- file.path(
+  lud11, "poppman", "data", "bir", "dat", "lud11", "native_obs_rast.parquet"
+)
 
-f_out <- file.path("/lud11/poppman/tmp", "biome_species_richness.csv")
+rsdd::dataset("gbif-powo_raw")
+taxon_tab <- rsdd::taxa()
+f_out <- file.path(lud11, "poppman/tmp", "biome_species_richness.csv")
 
-# Load taxa and frequency table
-taxa <- nanoparquet::read_parquet(f_taxa)
-freq_tab <- data.frame(nanoparquet::read_parquet(f_cells))
-colnames(freq_tab) <- c("row","specID", "cellID", "freq")
-freq_tab$cellID <- as.numeric(freq_tab$cellID)
+# Load frequency table
+if (!file.exists(f_native)) {
+  ftab <- nanoparquet::read_parquet(f_taxa)
+  colnames(ftab) <- c("specID", "cellID", "freq")
+  obs_tab <- merge(ftab, rsdd:::ds_cells, by = c("specID", "cellID")) %>%
+    dplyr::filter(native == TRUE) %>%
+    dplyr::select(specID, cellID, freq)
+  nanoparquet::write_parquet(obs_tab, f_native)
+  gc()
+} else {
+  obs_tab <- nanoparquet::read_parquet(f_native)
+}
 
 # Load the buffered biomes and rasterise them to get biome IDs per cell
 bbuff <- terra::vect(f_bbuff)
-map <- terra::rast(f_template)
-bbuffr <- terra::rasterize(bbuff, map, field = "ID")
-
-# Join biome IDs to frequency table
-biome_ids <- terra::as.data.frame(bbuffr, xy = FALSE, cells = TRUE)
-colnames(biome_ids) <- c("cellID", "biomeID")
-freq_tab <- base::merge(freq_tab, biome_ids, by = "cellID")
+bbuff$ID <- 1:nrow(bbuff)
+if (!file.exists(f_native_rastid)) {
+  map <- terra::rast(f_template)
+  bbuffr <- terra::rasterize(
+    bbuff,
+    map,
+    field = "ID",
+    filename = file.path(
+      lud11, "poppman", "data", "bir", "dat", "lud11", "BiomesBuffered.tif"
+    ),
+    overwrite = TRUE,
+    background = NA
+  )
+  
+  # Join biome IDs to frequency table
+  biome_ids <- terra::as.data.frame(bbuffr, xy = FALSE, cells = TRUE)
+  colnames(biome_ids) <- c("cellID", "biomeID")
+  freq_tab <- base::merge(obs_tab, biome_ids, by = "cellID")
+  nanoparquet::write_parquet(freq_tab, f_native_rastid)
+  gc()
+} else {
+  freq_tab <- nanoparquet::read_parquet(f_native_rastid)
+}
 
 # Estimate species richness per biome
 ## Helper function to safely convert to numeric
@@ -45,103 +80,80 @@ as.num <- function(x) {
 
 ## Function to estimate species richness for a given biome ID
 get_species_richness <- function(biome_id) {
-  sub_tab <- freq_tab[freq_tab$biomeID == biome_id, ]
-
+  sub_tab <- freq_tab[freq_tab$countryID == biome_id, ]
+  
   if (nrow(sub_tab) == 0) {
     return(
-        data.frame(
-            biomePatchID = biome_id,
-            speciesRichnessBa = NA,
-            speciesRichnessBaSE = NA,
-            speciesRichnessChao1 = NA,
-            speciesRichnessChao1SE = NA,
-            speciesRichnessACE = NA,
-            speciesRichnessACESE = NA,
-            speciesRichnessChao2 = NA,
-            speciesRichnessChao2SE = NA,
-            speciesRichnessjack1 = NA,
-            speciesRichnessjack1SE = NA,
-            speciesRichnessjack2 = NA,
-            speciesRichnessjack2SE = NA,
-            speciesRichnessboot = NA,
-            speciesRichnessbootSE = NA
-            )
-        )
-    }
-
+      data.frame(
+        ID = biome_id,
+        speciesRichnessBa = NA,
+        speciesRichnessBaSE = NA,
+        speciesRichnessChao1 = NA,
+        speciesRichnessChao1SE = NA,
+        speciesRichnessACE = NA,
+        speciesRichnessACESE = NA,
+        speciesRichnessChao2 = NA,
+        speciesRichnessBaCC = NA,
+        speciesRichnessChao1CC = NA,
+        speciesRichnessACECC = NA
+      )
+    )
+  }
+  
+  # Based on total observation counts
   obs_counts <- sub_tab %>%
     dplyr::group_by(specID) %>%
     dplyr::summarise(counts = sum(freq)) %>%
     dplyr::pull(counts)
   
-  # Breakaway (abundance-based)
+  # Based on occupied cell counts
+  cell_counts <- sub_tab %>%
+    dplyr::group_by(specID) %>%
+    dplyr::summarise(counts = dplyr::n()) %>%
+    dplyr::pull(counts)
+  
   baway <- tryCatch(
     breakaway::breakaway(obs_counts),
     error = function(e) list(est = NA, se = NA)
   )
-  # Chao1 (abundance-based)
-  chao1 <- vegan::estimateR(obs_counts)
   
-  # Create incidence matrix
-  inc_matrix <- tryCatch(
-    sub_tab %>%
-      dplyr::select(cellID, specID, freq) %>%
-      dplyr::mutate(presence = ifelse(freq > 0, 1, 0)) %>%
-      tidyr::pivot_wider(
-        names_from = specID,
-        values_from = presence,
-        values_fill = 0
-      ) %>%
-      dplyr::select(-cellID) %>%
-      as.matrix(),
-    error = function(e) NULL
+  bawayCC <- tryCatch(
+    breakaway::breakaway(cell_counts),
+    error = function(e) list(est = NA, se = NA)
   )
-  # Chao2 (incidence-based)
-  if (length(inc_matrix) == 0) {
-    inc_freq <- sub_tab %>%
-      dplyr::distinct(cellID, specID) %>%
-      dplyr::count(specID, name = "inc")
-    Q1 <- sum(inc_freq$inc == 1)
-    Q2 <- sum(inc_freq$inc == 2)
-    n  <- dplyr::n_distinct(sub_tab$cellID)
-    S_obs <- nrow(inc_freq)
   
-    if (Q2 > 0) {
-      chao2 <- S_obs + (Q1^2) / (2 * Q2)
-    } else {
-      chao2 <- S_obs + (Q1 * (Q1 - 1)) / 2
-    }
-    specp <- list(
-      chao = chao2,
-      chao.se = NA,
-      jack1 = NA,
-      jack1.se = NA,
-      jack2 = NA,
-      jack2.se = NA,
-      boot = NA,
-      boot.se = NA
-    )
+  chao1 <- vegan::estimateR(obs_counts)
+  chao1CC <- vegan::estimateR(cell_counts)
+  
+  inc_freq <- sub_tab %>%
+    dplyr::distinct(cellID, specID) %>%
+    dplyr::count(specID, name = "inc")
+  
+  Q1 <- sum(inc_freq$inc == 1)
+  Q2 <- sum(inc_freq$inc == 2)
+  n  <- dplyr::n_distinct(sub_tab$cellID)
+  S_obs <- nrow(inc_freq)
+  
+  if (Q2 > 0) {
+    chao2 <- S_obs + (Q1^2) / (2 * Q2)
   } else {
-    specp <- vegan::specpool(inc_matrix)
+    chao2 <- S_obs + (Q1 * (Q1 - 1)) / 2
   }
   
   df <- data.frame(
-    biomePatchID = as.num(biome_id),
+    ID = as.num(biome_id),
     speciesRichnessBa = as.num(baway$est),
     speciesRichnessBaSE = as.num(baway$se),
     speciesRichnessChao1 = as.num(chao1["S.chao1"]),
     speciesRichnessChao1SE = as.num(chao1["se.chao1"]),
     speciesRichnessACE = as.num(chao1["S.ACE"]),
     speciesRichnessACESE = as.num(chao1["se.ACE"]),
-    speciesRichnessChao2 = as.num(specp$chao),
-    speciesRichnessChao2SE = as.num(specp$chao.se),
-    speciesRichnessjack1 = as.num(specp$jack1),
-    speciesRichnessjack1SE = as.num(specp$jack1.se),
-    speciesRichnessjack2 = as.num(specp$jack2),
-    speciesRichnessjack2SE = as.num(specp$jack2.se),
-    speciesRichnessboot = as.num(specp$boot),
-    speciesRichnessbootSE = as.num(specp$boot.se)
-    )
+    speciesRichnessChao2 = as.num(chao2),
+    speciesRichnessBaCC = as.num(bawayCC$est),
+    speciesRichnessChao1CC = as.num(chao1CC["S.chao1"]),
+    speciesRichnessACECC = as.num(chao1CC["S.ACE"])
+  )
+  gc()
   return(df)
 }
 
