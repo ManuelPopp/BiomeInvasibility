@@ -38,7 +38,7 @@ if (!file.exists(f_native)) {
 
 # Load the buffered biomes and rasterise them to get biome IDs per cell
 bbuff <- terra::vect(f_bbuff)
-bbuff$ID <- 1:nrow(bbuff)
+
 if (!file.exists(f_native_rastid)) {
   map <- terra::rast(f_template)
   bbuffr <- terra::rasterize(
@@ -80,7 +80,7 @@ as.num <- function(x) {
 
 ## Function to estimate species richness for a given biome ID
 get_species_richness <- function(biome_id) {
-  sub_tab <- freq_tab[freq_tab$countryID == biome_id, ]
+  sub_tab <- freq_tab[freq_tab$biomeID == biome_id, ]
   
   if (nrow(sub_tab) == 0) {
     return(

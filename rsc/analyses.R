@@ -68,13 +68,19 @@ f_bathymetrie <- file.path(
 
 rsdd::dataset("gbif-powo_raw")
 
-f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_Locations")
+f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_Locations", "SInAS_Locations.shp")
 f_sinas_data <- file.path(dir_dat, "sinas", "SInAS_3.1.1.csv")
 
 sinas_places <- terra::vect(
   f_sinas_places
 ) %>%
   terra::project("epsg:4326")
+
+sinas_places <- sf::st_read(
+  f_sinas_places
+) %>%
+  sf::st_transform(4326) %>%
+  terra::vect()
 
 sinas_data <- read.table(f_sinas_data, sep = " ", header = TRUE)
 
@@ -208,13 +214,12 @@ if (!"dECA" %in% names(biomes) | recompute) {
 #>-----------------------------------------------------------------------------<
 #> Add species richness estimates
 f_est_div <- file.path(dir_tmp, "biome_species_richness.csv")
-est_div <- read.csv(f_est_div) %>%
-  dplyr::rename(ID = biomePatchID)
+est_div <- read.csv(f_est_div)
 
 biomes <- terra::merge(biomes, est_div, by = "ID", all.x = TRUE)
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
 
-vals <- biomes$speciesRichnessChao2
+vals <- biomes$speciesRichnessBa
 vals_log <- log10(vals)
 
 breaks <- pretty(vals_log, n = 12)
@@ -572,7 +577,7 @@ map_stats <- merged %>%
     biome = dplyr::first(Biome),
     total_area = dplyr::first(total_area),
     lowland_area = dplyr::first(lowland_area),
-    species_richness = dplyr::first(speciesRichnessChao2), # Select Chao2 (best estimate)
+    species_richness = dplyr::first(speciesRichnessBa),
     species_count = dplyr::n_distinct(Species, na.rm = TRUE)
   ) %>%
   dplyr::group_by(clusterID) %>%
@@ -615,7 +620,7 @@ ggplot2::ggsave(
 # Plot boxplots
 boxplot_data <- merged %>%
   dplyr::select(
-    Species, Status, lowland_area_km2, speciesRichnessChao2
+    Species, Status, lowland_area_km2, speciesRichnessBa
   ) %>%
   dplyr::group_by(Species, Status) %>%
   dplyr::summarise(
@@ -625,9 +630,9 @@ boxplot_data <- merged %>%
       lowland_area_km2, na.rm = TRUE
     ),
     max_richness = if(
-      all(is.na(speciesRichnessChao2))
+      all(is.na(speciesRichnessBa))
     ) NA else max(
-      speciesRichnessChao2, na.rm = TRUE
+      speciesRichnessBa, na.rm = TRUE
     ),
     .groups = "drop"
   ) %>%
@@ -708,7 +713,7 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
     labeller = as_labeller(
       c(
         "max_lowland_1e3km2" = "Maximum Lowland Area",
-        "max_richness" = "Maximum Species Richness (Chao2)"
+        "max_richness" = "Maximum Species Richness"
       )
     )
   ) +
@@ -769,7 +774,7 @@ stats_received <- merged %>%
     biome = dplyr::first(Biome),
     total_area = dplyr::first(total_area),
     lowland_area = dplyr::first(lowland_area),
-    species_richness = dplyr::first(speciesRichnessChao2), # Select Chao2 (best estimate)
+    species_richness = dplyr::first(speciesRichnessBa),
     dECA = dplyr::first(dECA),
     localECA = dplyr::first(localECA),
     clusterECA = dplyr::first(clusterECA),
@@ -794,7 +799,7 @@ ggplot2::ggplot(
 
 library(MASS)
 mod <- stats::glm(
-  introduced_species_count / species_richness ~ species_richness * lowland_area * dECA + Biome,
+  (introduced_species_count / species_richness) ~ species_richness * lowland_area * dECA + Biome,
   data = stats_received
   )
 summary(mod)

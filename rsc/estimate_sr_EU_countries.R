@@ -7,6 +7,7 @@ library("tidyr")
 library("terra")
 library("nanoparquet")
 library("vegan")
+library("iNEXT")
 
 # Set file paths
 f_bbuff <- file.path(lud11, "poppman/Europe", "Europe_merged.shp")
@@ -94,7 +95,9 @@ get_species_richness <- function(biome_id) {
         speciesRichnessChao2 = NA,
         speciesRichnessBaCC = NA,
         speciesRichnessChao1CC = NA,
-        speciesRichnessACECC = NA
+        speciesRichnessACECC = NA,
+        speciesRichnessiNEXT = NA,
+        speciesRichnessiNEXTCC = NA
         )
       )
   }
@@ -124,6 +127,24 @@ get_species_richness <- function(biome_id) {
   chao1 <- vegan::estimateR(obs_counts)
   chao1CC <- vegan::estimateR(cell_counts)
   
+  inext <- iNEXT::iNEXT(
+    obs_counts,
+    q = 0,
+    datatype = "abundance",
+    endpoint = 2 * sum(obs_counts),
+    se = TRUE,
+    nboot = 50
+  )$AsyEst$Estimator[1]
+  
+  inextCC <- iNEXT::iNEXT(
+    cell_counts,
+    q = 0,
+    datatype = "abundance",
+    endpoint = 2 * sum(cell_counts),
+    se = TRUE,
+    nboot = 50
+  )$AsyEst$Estimator[1]
+  
   inc_freq <- sub_tab %>%
     dplyr::distinct(cellID, specID) %>%
     dplyr::count(specID, name = "inc")
@@ -150,7 +171,9 @@ get_species_richness <- function(biome_id) {
     speciesRichnessChao2 = as.num(chao2),
     speciesRichnessBaCC = as.num(bawayCC$est),
     speciesRichnessChao1CC = as.num(chao1CC["S.chao1"]),
-    speciesRichnessACECC = as.num(chao1CC["S.ACE"])
+    speciesRichnessACECC = as.num(chao1CC["S.ACE"]),
+    speciesRichnessiNEXT = inext,
+    speciesRichnessiNEXTCC = inextCC
     )
   gc()
   return(df)
@@ -158,9 +181,11 @@ get_species_richness <- function(biome_id) {
 
 biome_ids_unique <- sort(unique(bbuff$ID))
 
+library("future.apply")
+future::plan("multicore", workers = parallel::detectCores() - 4)
 results_df <- do.call(
   rbind,
-  lapply(
+  future.apply::future_lapply(
     X = biome_ids_unique,
     FUN = function(id) {
       tryCatch(
@@ -168,10 +193,11 @@ results_df <- do.call(
         error = function(e) {
           stop(paste("Error in biome ID", id, ":", e$message))
         }
-        )
-      }
-    )
+      )
+    },
+    future.globals = c("get_species_richness")
   )
+)
 
 # Save results
 terra::merge(bbuff, results_df, by = "ID", all.x = TRUE) %>%
