@@ -13,7 +13,11 @@ library("vegan")
 library("ggrepel")
 library("breakaway")
 
+# Recompute species richness
+recompute <- FALSE
+
 # Set file paths
+dir_out <- file.path(lud11, "poppman", "tmp")
 f_template <- file.path(lud11, "nobis/Manuel/gbif/data/map_template.tif")
 f_taxa <- file.path(lud11, "nobis/Manuel/gbif-powo_raw_specID-cellID-occN.parquet")
 f_native <- file.path(
@@ -22,10 +26,10 @@ f_native <- file.path(
 f_native_rastid <- file.path(
   lud11, "poppman", "data", "bir", "dat", "lud11", "native_obs_North.parquet"
 )
+f_countries <- file.path(dir_out, "GIFT_richness_Northern.RData")
 
 rsdd::dataset("gbif-powo_raw")
 taxon_tab <- rsdd::taxa()
-dir_out <- file.path(lud11, "poppman", "tmp")
 
 # Load GIFT countries and rasterise them to get country IDs per cell
 gift_shapes <- GIFT::GIFT_shapes()
@@ -39,8 +43,34 @@ countries <- gift_shapes %>%
 
 countries$ID <- 1:nrow(countries)
 
+if (file.exists(f_countries) & !recompute) {
+  load(f_countries)
+  country_ids_unique <- sort(unique(countries_df$ID))
+} else {
+  # Add GIFT species counts
+  countries$GIFT <- NA
+  for (i in 1:nrow(countries)) {
+    taxa <- GIFT::GIFT_checklists(
+      taxon_name = "Tracheophyta",
+      complete_taxon = FALSE,
+      floristic_group = "native",
+      shp = countries[i,] %>% sf::st_as_sf(),
+      overlap = "centroid_inside",
+      list_set_only = FALSE
+    )
+    countries$GIFT[i] <- length(unique(taxa$checklists$work_species))
+  }
+  
+  countries_df <- as.data.frame(countries)
+  country_ids_unique <- sort(unique(countries$ID))
+  save(
+    countries_df,
+    file = f_countries
+  )
+}
+
 # Load frequency table
-if (!file.exists(f_native)) {
+if (!file.exists(f_native) | recompute) {
   ftab <- nanoparquet::read_parquet(f_taxa)
   colnames(ftab) <- c("specID", "cellID", "freq")
   obs_tab <- merge(ftab, rsdd:::ds_cells, by = c("specID", "cellID")) %>%
@@ -55,7 +85,7 @@ if (!file.exists(f_native)) {
 
 # Load the countries and rasterise them to get biome IDs per cell
 
-if (!file.exists(f_native_rastid)) {
+if (!file.exists(f_native_rastid) | recompute) {
   map <- terra::rast(f_template)
   countries_rst <- terra::rasterize(
     countries,
@@ -178,9 +208,12 @@ get_species_richness <- function(country_id) {
   return(df)
 }
 
-country_ids_unique <- sort(unique(countries$ID))
+f_out <- file.path(dir_out, "species_richness_Northern.RData")
 
-results_df <- do.call(
+if (file.exists(f_out) & !recompute) {
+  load(f_out)
+} else {
+  results_df <- do.call(
     rbind,
     lapply(
       X = country_ids_unique,
@@ -190,49 +223,27 @@ results_df <- do.call(
           error = function(e) {
             stop(paste("Error in country ID", id, ":", e$message))
           }
-          )
-        }
-      )
+        )
+      }
     )
-
-save(results_df, file = file.path(dir_out, "species_richness_Northern.RData"))
-
-# Add GIFT species counts
-countries$GIFT <- NA
-for (i in 1:nrow(countries)) {
-  taxa <- GIFT::GIFT_checklists(
-    taxon_name = "Tracheophyta",
-    complete_taxon = FALSE,
-    floristic_group = "native",
-    shp = countries[i,] %>% sf::st_as_sf(),
-    overlap = "centroid_inside",
-    list_set_only = FALSE
   )
-  countries$GIFT[i] <- length(unique(taxa$checklists$work_species))
+  
+  save(results_df, file = f_out)
 }
 
-countries_df <- as.data.frame(countries)
-save(
-  countries_df,
-  file = file.path(dir_out, "GIFT_richness_Northern.RData")
-)
-
+countries$GIFT <- countries_df$GIFT[
+  match(countries_df$entity_ID, countries$entity_ID)
+  ]
 spec_richness <- terra::merge(countries, results_df, by = "ID", all.x = TRUE)
 
 # Test corellation between Chao2 estimated species richness and GIFT
-corr <- lm(speciesRichnessChao2 ~ GIFT, data = spec_richness)
+corr <- lm(speciesRichnessBa ~ GIFT, data = spec_richness)
 res <- residuals(corr)
 spec_richness$residuals <- res
 nortest::ad.test(res)
 
 resmod <- lm(abs(residuals) ~ GIFT, data = spec_richness)
 summary(resmod)
-
-cor.test(
-  spec_richness$speciesRichnessChao2,
-  spec_richness$GIFT,
-  method = "spearman"
-)
 
 # Add information on continents
 continents <- rnaturalearth::ne_countries(
@@ -286,13 +297,37 @@ r2_tab_ctnt <- df_long %>%
     .groups = "drop"
   )
 
-continent_best_mean <- r2_tab_ctnt %>%
+spearman_tab <- df_long %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(GIFT), !is.na(Estimate)) %>%
+  dplyr::group_by(Method) %>%
+  dplyr::summarise(
+    rho = cor(GIFT, Estimate, method = "spearman"),
+    .groups = "drop"
+  )
+
+spearman_tab_ctnt <- df_long %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(GIFT), !is.na(Estimate), !is.na(Continent)) %>%
+  dplyr::group_by(Method, Continent) %>%
+  dplyr::summarise(
+    rho = cor(GIFT, Estimate, method = "spearman"),
+    .groups = "drop"
+  )
+
+continent_best_mean_r2 <- r2_tab_ctnt %>%
   dplyr::group_by(Method) %>%
   dplyr::summarise(meanR2 = mean(r2)) %>%
   dplyr::filter(meanR2 == max(meanR2)) %>%
   dplyr::pull(Method)
 
-overall_highest <- r2_tab_ctnt[r2_tab_ctnt$Method == continent_best_mean,]
+overall_highest <- r2_tab_ctnt[r2_tab_ctnt$Method == continent_best_mean_rho,]
+
+continent_best_mean_rho <- spearman_tab_ctnt %>%
+  dplyr::group_by(Method) %>%
+  dplyr::summarise(meanrho = mean(rho)) %>%
+  dplyr::filter(meanrho == max(meanrho)) %>%
+  dplyr::pull(Method)
 
 df_long <- df_long %>%
   dplyr::group_by(Method) %>%
@@ -310,6 +345,17 @@ df_long <- df_long %>%
 
 lims <- range(c(df_long$GIFT, df_long$Estimate), na.rm = TRUE)
 
+lab_tab <- cbind(r2_tab, rho = spearman_tab$rho)
+
+lab_tab$label <- mapply(
+  function(r2, rho) {
+    bquote(atop(R^2 == .(round(r2, 2)), rho == .(round(rho, 2))))
+  },
+  lab_tab$r2,
+  lab_tab$rho,
+  SIMPLIFY = FALSE
+)
+
 gg <- ggplot2::ggplot(
   df_long,
   ggplot2::aes(x = GIFT, y = Estimate, colour = Continent)
@@ -321,11 +367,11 @@ gg <- ggplot2::ggplot(
   ) +
   ggplot2::facet_wrap(~ Method, scales = "fixed") +
   ggplot2::geom_text(
-    data = r2_tab,
+    data = lab_tab,
     ggplot2::aes(
       x = -Inf,
       y = Inf,
-      label = paste0("R² = ", round(r2, 2))
+      label = label
     ),
     hjust = -0.1,
     vjust = 1.2,

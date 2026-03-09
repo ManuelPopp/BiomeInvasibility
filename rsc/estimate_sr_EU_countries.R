@@ -1,5 +1,5 @@
 lud11 <- ifelse(Sys.info()["sysname"] == "Windows", "L:", "/lud11")
-install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+#install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
 
 library("rsdd")
 library("dplyr")
@@ -79,8 +79,9 @@ as.num <- function(x) {
 }
 
 ## Function to estimate species richness for a given biome ID
-get_species_richness <- function(biome_id) {
-  sub_tab <- freq_tab[freq_tab$biomeID == biome_id, ]
+get_species_richness <- function(sub_tab) {
+  #sub_tab <- freq_tab[freq_tab$biomeID == biome_id, ]
+  biome_id <- sub_tab$biomeID[1]
 
   if (nrow(sub_tab) == 0) {
     return(
@@ -132,8 +133,8 @@ get_species_richness <- function(biome_id) {
     q = 0,
     datatype = "abundance",
     endpoint = 2 * sum(obs_counts),
-    se = TRUE,
-    nboot = 50
+    se = FALSE,
+    nboot = 0 #50
   )$AsyEst$Estimator[1]
   
   inextCC <- iNEXT::iNEXT(
@@ -141,8 +142,8 @@ get_species_richness <- function(biome_id) {
     q = 0,
     datatype = "abundance",
     endpoint = 2 * sum(cell_counts),
-    se = TRUE,
-    nboot = 50
+    se = FALSE,
+    nboot = 0#50
   )$AsyEst$Estimator[1]
   
   inc_freq <- sub_tab %>%
@@ -181,23 +182,15 @@ get_species_richness <- function(biome_id) {
 
 biome_ids_unique <- sort(unique(bbuff$ID))
 
-library("future.apply")
-future::plan("multicore", workers = parallel::detectCores() - 4)
-results_df <- do.call(
-  rbind,
-  future.apply::future_lapply(
-    X = biome_ids_unique,
-    FUN = function(id) {
-      tryCatch(
-        get_species_richness(id),
-        error = function(e) {
-          stop(paste("Error in biome ID", id, ":", e$message))
-        }
-      )
-    },
-    future.globals = c("get_species_richness")
-  )
-)
+library("data.table")
+data.table::setDT(freq_tab) 
+data.table::setkey(freq_tab, biomeID)
+
+results_df <- freq_tab[
+  ,
+  get_species_richness(.SD),
+  by = biomeID
+  ]
 
 # Save results
 terra::merge(bbuff, results_df, by = "ID", all.x = TRUE) %>%
