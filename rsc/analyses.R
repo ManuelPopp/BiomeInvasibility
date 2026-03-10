@@ -16,6 +16,9 @@ library("ggplot2")
 library("viridis")
 library("dplyr")
 library("tidyr")
+library("lme4")
+library("glmmTMB")
+library("boot")
 library("future.apply")
 library("progressr")
 
@@ -523,7 +526,7 @@ ggdf <- merged |>
 
 gg_gist <- ggplot2::ggplot(
   data = ggdf,
-  ggplot2::aes(x = gist_label_N, y = log(lowland_area_km2), fill = gist_impact_label)
+  ggplot2::aes(x = gist_label_N, y = lowland_area_km2, fill = gist_impact_label)
 ) +
   ggplot2::geom_boxplot() +
   ggplot2::xlab("GIST impact class") +
@@ -531,7 +534,11 @@ gg_gist <- ggplot2::ggplot(
   ggplot2::scale_fill_manual(
     values = c("firebrick3", "coral3", "lightsalmon3", "darkgoldenrod3", "slateblue3")
     ) +
-  ggplot2::theme(legend.position = "none")
+  ggplot2::theme(legend.position = "none") +
+  ggplot2::scale_y_log10(
+    name = expression("Area in km"^2~"(log scaled)"),
+    labels = scales::label_number()
+    )
 
 ggplot2::ggsave(
   filename = file.path(dir_main, "fig", "BoxplotGISDclasses.svg"),
@@ -539,10 +546,31 @@ ggplot2::ggsave(
   width = 7, height = 5
 )
 
+gg_gist_Ba <- ggplot2::ggplot(
+  data = ggdf,
+  ggplot2::aes(x = gist_label_N, y = speciesRichnessBa, fill = gist_impact_label)
+) +
+  ggplot2::geom_boxplot() +
+  ggplot2::xlab("GIST impact class") +
+  ggplot2::theme_bw() +
+  ggplot2::scale_fill_manual(
+    values = c("firebrick3", "coral3", "lightsalmon3", "darkgoldenrod3", "slateblue3")
+  ) +
+  ggplot2::theme(legend.position = "none") +
+  ggplot2::scale_y_log10(
+    name = "Estimated species richness (log scaled)",
+    labels = scales::label_number()
+  )
+
+ggplot2::ggsave(
+  filename = file.path(dir_main, "fig", "BoxplotGISDclassesBa.svg"),
+  plot = gg_gist_Ba,
+  width = 7, height = 5
+)
 
 gg_gist_worst <- ggplot2::ggplot(
   data = ggdf,
-  ggplot2::aes(x = gist_100_worst, y = log(lowland_area_km2), fill = gist_100_worst)
+  ggplot2::aes(x = gist_100_worst, y = log(speciesRichnessBa), fill = gist_100_worst)
 ) +
   ggplot2::geom_boxplot() +
   ggplot2::xlab("GIST assessment") +
@@ -725,7 +753,7 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   ggplot2::coord_transform(y = "log10") +
   ggplot2::labs(
     title = NULL,
-    y = expression("Area (" * 10^3 * " km"^2 * ") / Estimated species count"),
+    y = expression("Area (" * 10^3 * " km"^2 * ")"),
     x = "Biome patch status"
   ) +
   ggplot2::theme_bw() +
@@ -738,17 +766,20 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(x = 1.5, label = label),
-    vjust = 6
+    vjust = 4.5
     ) +
   ggplot2::scale_y_continuous(
     breaks = c(1e-2, 1, 1e2, 1e4),
-    labels = scales::label_scientific()
+    labels = scales::label_scientific(),
+    sec.axis = sec_axis(
+      ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
+      )
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "MaxLowlandAreaBoxplot.svg"),
+  filename = file.path(dir_main, "fig", "MaxAreaRichnessBoxplot.svg"),
   plot = gg_area,
-  width = 13, height = 3
+  width = 10, height = 4
 )
 
 #>=============================================================================<
@@ -761,45 +792,202 @@ ggplot2::ggsave(
 #> Statistical analyses
 #<=============================================================================>
 
-cat(
-  ">--------------------Statistical model outputs--------------------<",
-  file = f_glm_stats, append = FALSE
-)
-
-stats_received <- merged %>%
-  dplyr::filter(Status == "Receiver") %>%
-  dplyr::group_by(ID, Biome, Status) %>%
+df_donor <- merged %>%
+  dplyr::mutate(
+    PatchID = ID,
+    Area = lowland_area,
+    SpeciesRichness = round(speciesRichnessBa, 0)
+    ) %>%
+  dplyr::group_by(Species, Status) %>%
+  dplyr::filter(
+    Status == "Donor",
+    Count == max(Count),
+    SpeciesRichness > 50
+    ) %>%
+  dplyr::group_by(Biome, PatchID, Area, SpeciesRichness, Status) %>%
   dplyr::summarise(
-    clusterID = dplyr::first(clusterID),
-    biome = dplyr::first(Biome),
-    total_area = dplyr::first(total_area),
-    lowland_area = dplyr::first(lowland_area),
-    species_richness = dplyr::first(speciesRichnessBa),
-    dECA = dplyr::first(dECA),
-    localECA = dplyr::first(localECA),
-    clusterECA = dplyr::first(clusterECA),
-    introduced_species_count = dplyr::n_distinct(Species, na.rm = TRUE)
+    N = dplyr::n()
+  ) %>%
+  tidyr::pivot_wider(
+    id_cols = c(Biome, PatchID, Area, SpeciesRichness),
+    names_from = Status,
+    values_from = N
+  ) %>%
+  tidyr::replace_na(replace = list(Donor = 0, Receiver = 0)) %>%
+  dplyr::rename(
+    DonorOf = Donor
   )
 
-stats_received_long <- stats_received %>%
-  tidyr::pivot_longer(
-    cols = c(total_area, lowland_area, species_richness),
-    names_to = "metric",
-    values_to = "value"
+df_within$failures <- pmax(df_within$SpeciesRichness - df_within$DonorOf, 0) 
+
+## GLM that includes biome
+modInvasiveBreeder_glm <- stats::glm(
+  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + factor(Biome),
+  data = df_within,
+  family = stats::quasibinomial()
+)
+
+summary(modInvasiveBreeder_glm)
+coef_tab_glm <- summary(modInvasiveBreeder_glm)$coefficients
+
+## GLMM that controls for biome
+cor(df_donor$Area, df_donor$SpeciesRichness, use = "complete.obs")
+modInvasiveBreeder_glmm <- lme4::glmer(
+  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + (1 | Biome),
+  data = df_within,
+  family = binomial
+)
+
+summary(modInvasiveBreeder_glmm)
+anova(modInvasiveBreeder_glmm)
+
+overdisp_fun <- function(model) {
+  rdf <- df.residual(model)
+  rp <- residuals(model, type = "pearson")
+  sum(rp^2) / rdf
+}
+
+overdisp_fun(modInvasiveBreeder_glmm)
+
+## Betabinomial GLMM
+modInvasiveBreeder_bb <- glmmTMB::glmmTMB(
+  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + (1 | Biome),
+  data = df_within,
+  family = glmmTMB::betabinomial()
+)
+
+summary(modInvasiveBreeder_bb)
+
+
+library(DHARMa)
+res <- DHARMa::simulateResiduals(modInvasiveBreeder_bb)
+DHARMa::testDispersion(res)
+
+DHARMa::plotResiduals(res)
+DHARMa::testZeroInflation(res)
+
+
+
+
+
+
+
+df_within <- merged %>%
+  dplyr::mutate(
+    PatchID = ID,
+    Area = lowland_area,
+    SpeciesRichness = round(speciesRichnessBa, 0)
   ) %>%
+  dplyr::group_by(Species, Status) %>%
+  dplyr::filter(
+    #Biome == MainOrigin,
+    Count > 10,
+    SpeciesRichness > 50
+  ) %>%
+  dplyr::group_by(Biome, Species, clusterID, Status) %>%
+  dplyr::summarise(
+    Count = sum(Count),
+    clusterRichness = max(speciesRichnessBa, na.rm = TRUE),
+    localECA = max(localECA, na.rm = TRUE),
+    clusterECA = max(clusterECA, na.rm = TRUE),
+    .groups = "drop"
+  ) %>%
+  dplyr::group_by(Biome, Species, Status) %>%
+  dplyr::filter(
+    Count == max(Count, na.rm = TRUE)
+  ) %>%
+  dplyr::filter(# Addiditonal filter, since in some cases, multiple clusters have max(Count)
+    clusterRichness == max(clusterRichness)
+  ) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Biome, Species) %>%
+  dplyr::filter(
+    !duplicated(clusterID),
+    dplyr::n_distinct(Status) == 2
+    ) %>%
   dplyr::ungroup()
 
 ggplot2::ggplot(
-  data = stats_received_long,
-  ggplot2::aes(x = log(value), y = log(introduced_species_count), colour = Biome)
-) +
-  ggplot2::geom_point() +
-  ggplot2::geom_smooth(method = "lm", se = FALSE) +
-  ggplot2::facet_wrap(.~metric, scales = "free_x")
+  data = df_within,
+  ggplot2::aes(y = log(clusterRichness), colour = Status)
+  ) +
+  ggplot2::geom_boxplot()
 
-library(MASS)
-mod <- stats::glm(
-  (introduced_species_count / species_richness) ~ species_richness * lowland_area * dECA + Biome,
-  data = stats_received
-  )
-summary(mod)
+df_wide_richness <- df_within %>%
+  dplyr::select(Biome, Species, Status, clusterRichness) %>%
+  tidyr::pivot_wider(
+    names_from = Status,
+    values_from = clusterRichness
+  ) %>%
+  dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
+  dplyr::mutate(diff = Donor - Receiver)
+
+# Wilcoxon signed-rank test (paired)
+wilcox.test(
+  df_wide_richness$Donor,
+  df_wide_richness$Receiver,
+  paired = TRUE,
+  alternative = "greater"
+)
+
+# Bootstrap effect size (median difference)
+boot_median <- boot::boot(
+  data = df_wide_richness$diff,
+  statistic = function(x, i) median(x[i]),
+  R = 10000
+)
+boot::boot.ci(boot_median, type = "perc")
+
+df_wide_richness <- df_within %>%
+  dplyr::select(Biome, Species, Status, clusterRichness) %>%
+  tidyr::pivot_wider(
+    names_from = Status,
+    values_from = clusterRichness
+  ) %>%
+  dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
+  dplyr::mutate(
+    diff = Donor - Receiver,
+    ratio = Receiver / Donor
+    )
+
+# Wilcoxon signed-rank test (paired)
+wilcox.test(
+  df_wide_richness$Donor,
+  df_wide_richness$Receiver,
+  paired = TRUE,
+  alternative = "greater"
+)
+
+# Bootstrap effect size (median difference)
+boot_median <- boot::boot(
+  data = df_wide_richness$diff,
+  statistic = function(x, i) median(x[i]),
+  R = 10000
+)
+boot::boot.ci(boot_median, type = "perc")
+
+# Same for cluster ECA
+df_wide_ECA <- df_within %>%
+  dplyr::select(Biome, Species, Status, clusterECA) %>%
+  tidyr::pivot_wider(
+    names_from = Status,
+    values_from = clusterECA
+  ) %>%
+  dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
+  dplyr::mutate(diff = Donor - Receiver)
+
+# Wilcoxon signed-rank test (paired)
+wilcox.test(
+  df_wide_ECA$Donor,
+  df_wide_ECA$Receiver,
+  paired = TRUE,
+  alternative = "greater"
+)
+
+# Bootstrap effect size (median difference)
+boot_median <- boot::boot(
+  data = df_wide_ECA$diff,
+  statistic = function(x, i) median(x[i]),
+  R = 10000
+)
+boot::boot.ci(boot_median, type = "perc")
