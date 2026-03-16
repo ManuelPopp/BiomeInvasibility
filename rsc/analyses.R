@@ -10,12 +10,12 @@
 
 print(Sys.time())
 library("rsdd")
-library("terra")
-library("tidyterra")
 library("ggplot2")
 library("viridis")
 library("dplyr")
 library("tidyr")
+library("terra")
+library("tidyterra")
 library("lme4")
 library("glmmTMB")
 library("boot")
@@ -105,6 +105,20 @@ f_sPlot <- file.path(
   dir_lud11, "poppman/data/bir/dat/lud11/sPlotOpen/sPlotOpen.RData"
 )
 
+# Environmental raster data
+f_tasmean <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/environment", "tasmean_clim.tif"
+  )
+f_prec <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/environment", "pr_clim.tif"
+)
+f_ghm <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/environment", "gHM_resampled_CHELSA.tif"
+)
+f_npp <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/environment", "npp_mean.tif"
+)
+
 # Create missing directories
 if (!dir.exists(dir_imed)) {
   dir.create(dir_imed, showWarnings = FALSE, recursive = TRUE)
@@ -130,6 +144,11 @@ sinas_data <- read.table(f_sinas_data, sep = " ", header = TRUE)
 
 taxa <- rsdd::taxa()
 tax_avail <- taxa$species
+
+tasmean <- terra::rast(f_tasmean)
+prec <- terra::rast(f_prec)
+ghm <- terra::rast(f_ghm)
+npp <- terra::rast(f_npp)
 
 #>-----------------------------------------------------------------------------<
 #> Prepare biome map
@@ -282,7 +301,9 @@ dev.off()
 #>-----------------------------------------------------------------------------<
 #> Assign species to biome patches
 
-assign_patches <- function(taxon, nativeness_source = "powo") {
+assign_patches <- function(
+    taxon, nativeness_source = "powo", load_spatial_data = FALSE
+    ) {
   ## Ensure to use a valid taxon name. Since alternative names ans subspecies
   ## were aggregated in rsdd, we use species-level names. This may introduce
   ## some errror if multiple subspecies are native or invasive within the same
@@ -317,7 +338,7 @@ assign_patches <- function(taxon, nativeness_source = "powo") {
     }
     
     obs <- rsdd::get_taxon(
-      rsdd_taxon, status = "all", # Here, we use all observations to employ the SINaS native/Exotic definitions
+      rsdd_taxon, status = c("native", "non-native", "N/A"), # Here, we use all observations to employ the SINaS native/Exotic definitions
       format = "centroids"
     ) %>%
       terra::vect(geom = c("x", "y"), crs = "epsg:4326")
@@ -331,7 +352,7 @@ assign_patches <- function(taxon, nativeness_source = "powo") {
     ) %>%
       terra::vect(geom = c("x", "y"), crs = "epsg:4326")
     introduced_obs <- rsdd::get_taxon(
-      rsdd_taxon, status = "non-native",
+      rsdd_taxon, status = c("non-native", "N/A"),
       format = "centroids"
     ) %>%
       terra::vect(geom = c("x", "y"), crs = "epsg:4326")
@@ -342,7 +363,7 @@ assign_patches <- function(taxon, nativeness_source = "powo") {
   }
   
   # Get buffered biomes
-  if (!exists("biomes_buff")) {
+  if (load_spatial_data) {
     biomes_buff <- terra::vect(f_bbuff)
   }
   
@@ -384,13 +405,35 @@ assign_patches <- function(taxon, nativeness_source = "powo") {
     rowSums() %>%
     as.vector()
   
+  # Get climate and productivity variables
+  if (load_spatial_data) {
+    tasmean <- terra::rast(f_tasmean)
+    prec <- terra::rast(f_prec)
+    ghm <- terra::rast(f_ghm)
+    npp <- terra::rast(f_npp)
+  }
+  native_tasmean <- terra::extract(tasmean, native_obs, ID = FALSE)[, 1]
+  native_psum <- terra::extract(prec, native_obs, ID = FALSE)[, 1]
+  native_ghm <- terra::extract(ghm, native_obs, ID = FALSE)[, 1]
+  native_npp <- terra::extract(npp, native_obs, ID = FALSE)[, 1]
+  intro_tasmean <- terra::extract(tasmean, introduced_obs, ID = FALSE)[, 1]
+  intro_psum <- terra::extract(prec, introduced_obs, ID = FALSE)[, 1]
+  intro_ghm <- terra::extract(ghm, introduced_obs, ID = FALSE)[, 1]
+  intro_npp <- terra::extract(npp, introduced_obs, ID = FALSE)[, 1]
+  
   # Create data frames
   df_origin <- data.frame(
     Species = rep(taxon, length(native_patches$ID)),
     Biome = native_patches$BIOME,
     PatchID = native_patches$ID,
     Count = native_patches$obs_count,
-    Status = rep("Donor", length(native_patches$ID))
+    Status = rep("Donor", length(native_patches$ID)),
+    tasmean = mean(native_tasmean, na.rm = TRUE),
+    tasmean_sd = sd(native_tasmean, na.rm = TRUE),
+    prec = mean(native_psum, na.rm = TRUE),
+    prec_sd = sd(native_psum, na.rm = TRUE),
+    ghm = mean(native_ghm, na.rm = TRUE),
+    npp = mean(native_npp, na.rm = TRUE)
   )
   
   df_destination <- data.frame(
@@ -398,7 +441,13 @@ assign_patches <- function(taxon, nativeness_source = "powo") {
     Biome = introduced_patches$BIOME,
     PatchID = introduced_patches$ID,
     Count = introduced_patches$obs_count,
-    Status = rep("Receiver", length(introduced_patches$ID))
+    Status = rep("Receiver", length(introduced_patches$ID)),
+    tasmean = mean(intro_tasmean, na.rm = TRUE),
+    tasmean_sd = sd(intro_tasmean, na.rm = TRUE),
+    prec = mean(intro_psum, na.rm = TRUE),
+    prec_sd = sd(intro_psum, na.rm = TRUE),
+    ghm = mean(intro_ghm, na.rm = TRUE),
+    npp = mean(intro_npp, na.rm = TRUE)
   )
   
   df <- rbind(df_origin, df_destination)
@@ -438,7 +487,13 @@ if (file.exists(f_out) & !recompute) {
 } else {
   progressr::handlers(global = TRUE)
   progressr::handlers("progress")
-  future::plan(future::multicore)
+  if (Sys.info()["sysname"] == "Windows") {
+    future::plan(future::multisession, workers = parallel::detectCores() - 1)
+    lsd <- TRUE # Load spatial data which is not shared between sessions
+  } else {
+    future::plan(future::multicore)
+    lsd <- FALSE
+  }
   Sys.time()
   progressr::with_progress({
     p <- progressr::progressor(along = specs)
@@ -448,7 +503,11 @@ if (file.exists(f_out) & !recompute) {
         FUN = function(spec) {
           tryCatch(
             {
-              res <- assign_patches(spec, nativeness_source = nativeness_source)
+              res <- assign_patches(
+                spec,
+                nativeness_source = nativeness_source,
+                load_spatial_data = lsd
+                )
               p()
               res
             },
@@ -779,7 +838,7 @@ boxplot_data <- merged %>%
   dplyr::ungroup()
 
 # Calculate statistics
-library(rstatix)
+library("rstatix")
 ## Calculate statistics with log-scale aware positioning
 metric_max_values <- boxplot_data %>%
   dplyr::group_by(metric) %>%
@@ -1240,7 +1299,24 @@ boot::boot.ci(boot_median, type = "perc")
 
 
 
+mod_richness <- lmer(
+  log(SpeciesRichness) ~ log(Area) + Productivity + Disturbance + (1 | Biome),
+  data = df
+)
 
+mod_donor <- glmmTMB(
+  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + Productivity + (1 | Biome),
+  family = betabinomial(),
+  data = df
+)
+
+mod_receiver <- glmmTMB(
+  InvasiveCount ~ log(SpeciesRichness) + Disturbance + HumanModification + (1 | Biome),
+  family = poisson(),
+  data = df
+)
+
+psem(mod_richness, mod_donor, mod_receiver)
 
 
 
