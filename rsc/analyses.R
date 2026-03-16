@@ -490,6 +490,7 @@ if (file.exists(f_out) & !recompute) {
   if (Sys.info()["sysname"] == "Windows") {
     future::plan(future::multisession, workers = parallel::detectCores() - 1)
     lsd <- TRUE # Load spatial data which is not shared between sessions
+    stop("Not implemented error: Windows is garbage and this won't run.")
   } else {
     future::plan(future::multicore)
     lsd <- FALSE
@@ -523,6 +524,8 @@ if (file.exists(f_out) & !recompute) {
   
   write.csv(df_species_patches, file = f_out, row.names = FALSE)
 }
+
+stop("Cluster stuff done.")
 
 
 #>=============================================================================<
