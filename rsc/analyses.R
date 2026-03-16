@@ -525,8 +525,6 @@ if (file.exists(f_out) & !recompute) {
   write.csv(df_species_patches, file = f_out, row.names = FALSE)
 }
 
-stop("Cluster stuff done.")
-
 
 #>=============================================================================<
 #> Add GIST status for the most invasive species
