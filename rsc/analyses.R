@@ -53,7 +53,7 @@ biome_names <- c(
   "Rock and Ice"
 )
 
-nativeness_source <- "sinas"
+nativeness_source <- "glonaf"
 biome_def <- "olson"
 
 # Main directories
@@ -68,10 +68,19 @@ if (Sys.info()["sysname"] == "Windows") {
 dir_dat <- file.path(dir_lud11, "poppman", "data", "bir", "dat", "lud11")
 dir_stats <- file.path(dir_main, "stats")
 dir_imed <- file.path(dir_dat, "biomes", biome_def, "intermediate_data", nativeness_source)
+dir_fig <- file.path(dir_main, "fig", nativeness_source)
+
+if (!dir.exists(dir_fig)) {
+  dir.create(dir_fig, recursive = TRUE)
+}
 
 # Invasive species data base files
-f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_Locations", "SInAS_Locations.shp")
+f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_locations_3.1.gpkg")
 f_sinas_data <- file.path(dir_dat, "sinas", "SInAS_3.1.1.csv")
+
+f_glonaf_places <- file.path(dir_dat, "glonaf", "glonaf_2024_regions", "glonaf_2024_regions.shp")
+f_glonaf_data <- file.path(dir_dat, "glonaf", "glonaf_flora2.csv")
+f_glonaf_taxa <- file.path(dir_dat, "glonaf", "glonaf_taxon_wcvp.csv")
 
 # Original biomes file
 f_biomes <- file.path(dir_dat, "biomes", biome_def, "biomes.shp")
@@ -105,6 +114,10 @@ f_sPlot <- file.path(
   dir_lud11, "poppman/data/bir/dat/lud11/sPlotOpen/sPlotOpen.RData"
 )
 
+f_gadm <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/db", "gadm_countries.gpkg"
+)
+
 # Environmental raster data
 f_tasmean <- file.path(
   dir_lud11, "poppman/data/bir/dat/lud11/environment", "tasmean_clim.tif"
@@ -128,22 +141,28 @@ if (!dir.exists(dir_imed)) {
 #> Data preparation
 #<=============================================================================>
 
+## GBIF
 rsdd::dataset("gbif-powo_raw")
-# sinas_places <- terra::vect(
-#   f_sinas_places
-# ) %>%
-#   terra::project("epsg:4326")
+taxa <- rsdd::taxa()
+tax_avail <- taxa$species
 
-sinas_places <- sf::st_read(
+## SINaS
+sinas_places <- terra::vect(
   f_sinas_places
-) %>%
-  sf::st_transform(4326) %>%
-  terra::vect()
+)
 
 sinas_data <- read.table(f_sinas_data, sep = " ", header = TRUE)
 
-taxa <- rsdd::taxa()
-tax_avail <- taxa$species
+## GloNaF
+glonaf_places <- terra::vect(
+  f_glonaf_places
+)
+
+glonaf_taxa <- read.csv(f_glonaf_taxa, header = TRUE)
+glonaf_data <- read.csv(f_glonaf_data, header = TRUE) %>%
+  dplyr::mutate(
+    taxon = glonaf_taxa[match(id, glonaf_taxa$id), "taxon_corrected"]
+  )
 
 tasmean <- terra::rast(f_tasmean)
 prec <- terra::rast(f_prec)
@@ -281,7 +300,7 @@ plot_cols <- cols[col_idx]
 plot_cols[is.na(vals)] <- "grey50"
 
 png(
-  filename = file.path(dir_main, "fig", "SpeciesRichness.png"),
+  filename = file.path(dir_fig, "SpeciesRichness.png"),
   width = 700, height = 500
   )
 plot(
@@ -322,16 +341,16 @@ assign_patches <- function(
   }
   
   if (nativeness_source == "sinas") {
-    ds <- sinas_data[sinas_data$taxon == taxon, ]
-    native_loc_ids <- ds[ds$establishmentMeans == "native", ]$location
-    introduced_loc_ids <- ds[ds$establishmentMeans == "introduced", ]$location
+    ds <- sinas_data[which(sinas_data$taxon == taxon), ]
+    native_loc_ids <- ds[ds$establishmentMeans == "native", ]$locationID
+    introduced_loc_ids <- ds[ds$establishmentMeans == "introduced", ]$locationID
     
     if (length(native_loc_ids) == 0 | length(introduced_loc_ids) == 0) {
       return(data.frame())
     }
     
-    native <- sinas_places[sinas_places$Location %in% native_loc_ids, ]
-    introduced <- sinas_places[sinas_places$Location %in% introduced_loc_ids, ]
+    native <- sinas_places[which(sinas_places$locationID %in% native_loc_ids), ]
+    introduced <- sinas_places[which(sinas_places$locationID %in% introduced_loc_ids), ]
     
     if (terra::is.empty(native) | terra::is.empty(introduced)) {
       return(data.frame())
@@ -345,6 +364,33 @@ assign_patches <- function(
     
     native_obs <- terra::intersect(obs, native)
     introduced_obs <- terra::intersect(obs, introduced)
+  } else if (nativeness_source == "glonaf") {
+    ds <- glonaf_data[which(glonaf_data$taxon == taxon), ]
+    introduced_loc_ids <- ds$region_id
+    
+    introduced <- glonaf_places[which(glonaf_places$OBJIDsic %in% introduced_loc_ids), ]
+    
+    native_obs <- rsdd::get_taxon(
+      rsdd_taxon, status = "native",
+      format = "centroids"
+    ) %>%
+      terra::vect(geom = c("x", "y"), crs = "epsg:4326") %>%
+      terra::mask(introduced, inverse = TRUE)
+    
+    if (terra::is.empty(native_obs)) {
+      return(data.frame())
+    }
+    
+    introduced_obs <- rsdd::get_taxon(
+      rsdd_taxon, status = c("non-native", "N/A"),
+      format = "centroids"
+    ) %>%
+      terra::vect(geom = c("x", "y"), crs = "epsg:4326") %>%
+      terra::intersect(introduced)
+    
+    if (terra::is.empty(introduced_obs)) {
+      return(data.frame())
+    }
   } else {
     native_obs <- rsdd::get_taxon(
       rsdd_taxon, status = "native",
@@ -542,21 +588,24 @@ gisd <- read.csv(f_gisd) %>%
 
 worst <- read.csv(f_100_worst)$Species
 
+gadm <- terra::vect(f_gadm)
+
 check_gist <- function(taxon, biome_patch_id) {
   if (taxon %in% gisd$Species) {
-    locations <- sinas_places[
+    countries <- gadm[
       which(
         terra::is.related(
-          sinas_places,
+          gadm,
           biomes[which(biomes$ID == biome_patch_id),],
           relation = "intersects"
         )
       ),
-    ]$Location
+    ]$COUNTRY
     
     categories <- gisd[
-      gisd$Countries.of.impact %in% locations & gisd$Species == taxon,
+      gisd$Countries.of.impact %in% countries & gisd$Species == taxon,
     ]$EICAT.Category
+    
     if (length(categories) < 1) {
       return(NA)
     }
@@ -569,24 +618,31 @@ check_gist <- function(taxon, biome_patch_id) {
   }
 }
 
-
-df_species_patches <- df_species_patches %>%
-  dplyr::rowwise() %>%
-  dplyr::mutate(gisd_impact_level = check_gist(Species, PatchID)) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate(
-    gist_impact_label = ifelse(
-      is.na(gisd_impact_level),
-      "Not evaluated",
-      gisd_levels[gisd_impact_level]
-    )
-  ) %>%
-  dplyr::mutate(
-    gist_impact_label = factor(
-      gist_impact_label, levels = c(gisd_levels, "Not evaluated")
+f_out_gist <- sub("df_species_patches.csv", "df_species_patches_gist.csv", f_out)
+if (!file.exists(f_out_gist)) {
+  df_species_patches %>%
+    dplyr::rowwise() %>%
+    dplyr::mutate(gisd_impact_level = check_gist(Species, PatchID)) %>%
+    dplyr::ungroup() %>%
+    dplyr::mutate(
+      gist_impact_label = ifelse(
+        is.na(gisd_impact_level),
+        "Not evaluated",
+        gisd_levels[gisd_impact_level]
+      )
+    ) %>%
+    dplyr::mutate(
+      gist_impact_label = factor(
+        gist_impact_label, levels = c(gisd_levels, "Not evaluated")
       ),
-    gist_100_worst = factor(Species %in% worst)
-  )
+      gist_100_worst = factor(Species %in% worst)
+    ) %>%
+    write.csv(
+      file = f_out_gist
+    )
+}
+
+df_species_patches <- read.csv(f_out_gist)
 
 
 #>=============================================================================<
@@ -621,16 +677,18 @@ ggdf <- merged |>
   dplyr::filter(Status == "Receiver") |>
   dplyr::add_count(gist_impact_label, name = "N") |>
   dplyr::mutate(
+    gist_100_worst = factor(gist_100_worst),
     gist_label_N = paste0(gist_impact_label, "\nN = ", N),
     gist_label_N = factor(
       gist_label_N,
-      levels = paste0(
-        levels(gist_impact_label),
-        "\nN = ",
-        tapply(N, gist_impact_label, unique)
-        )
-      )
-    ) %>%
+      levels = unique(gist_label_N)[
+        match(
+          substr(c(gisd_levels, "Not evaluated"), 1, 5),
+          substr(unique(gist_label_N), 1, 5)
+          )
+      ]
+    )
+    )|>
   dplyr::filter(BiomeID <= 13 & BiomeID != 10)
 
 gg_gist <- ggplot2::ggplot(
@@ -641,7 +699,9 @@ gg_gist <- ggplot2::ggplot(
   ggplot2::xlab("GIST impact class") +
   ggplot2::theme_bw() +
   ggplot2::scale_fill_manual(
-    values = c("firebrick3", "coral3", "lightsalmon3", "darkgoldenrod3", "slateblue3")
+    values = c(
+      "firebrick3", "coral3", "lightsalmon3", "darkgoldenrod3", "slateblue3"
+      )
     ) +
   ggplot2::theme(legend.position = "none") +
   ggplot2::scale_y_log10(
@@ -650,7 +710,7 @@ gg_gist <- ggplot2::ggplot(
     )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "BoxplotGISDclasses.svg"),
+  filename = file.path(dir_fig, "BoxplotGISDclasses.svg"),
   plot = gg_gist,
   width = 7, height = 5
 )
@@ -672,7 +732,7 @@ gg_gist_Ba <- ggplot2::ggplot(
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "BoxplotGISDclassesBa.svg"),
+  filename = file.path(dir_fig, "BoxplotGISDclassesBa.svg"),
   plot = gg_gist_Ba,
   width = 7, height = 5
 )
@@ -707,7 +767,7 @@ effectsize::cohens_d(
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "BoxplotGISD100worst.svg"),
+  filename = file.path(dir_fig, "BoxplotGISD100worst.svg"),
   plot = gg_gist_worst,
   width = 5, height = 5
 )
@@ -750,12 +810,12 @@ DHARMa::testOutliers(sim_res)
 map_stats <- merged %>%
   dplyr::group_by(ID, Status) %>%
   dplyr::summarise(
-    clusterID = dplyr::first(clusterID),
-    BiomeID = dplyr::first(BiomeID),
-    Biome = dplyr::first(Biome),
-    total_area = dplyr::first(total_area),
-    lowland_area = dplyr::first(lowland_area),
-    species_richness = dplyr::first(speciesRichnessBa),
+    clusterID = dplyr::first(na.omit(clusterID)),
+    BiomeID = dplyr::first(na.omit(BiomeID)),
+    Biome = dplyr::first(na.omit(Biome)),
+    total_area = dplyr::first(na.omit(total_area)),
+    lowland_area = dplyr::first(na.omit(lowland_area)),
+    species_richness = dplyr::first(na.omit(speciesRichnessBa)),
     species_count = dplyr::n_distinct(Species, na.rm = TRUE),
     .groups = "drop"
   ) %>%
@@ -770,12 +830,20 @@ map_stats <- merged %>%
   dplyr::ungroup()
 
 
-remerge <- terra::merge(
-  biomes,
-  map_stats[, which(!names(map_stats) %in% names(biomes)[-1])],
-  by = "ID",
-  all.x = TRUE
-  )
+remerge <- biomes[rep(1:nrow(biomes), each = 2), ]
+values(remerge) <- biomes %>%
+  terra::as.data.frame() %>%
+  dplyr::slice(rep(1:n(), each = 2)) %>%
+  dplyr::mutate(Status = rep(c("Donor", "Receiver"), times = nrow(biomes))) %>%
+  dplyr::left_join(
+    map_stats[, -which(names(map_stats) %in% names(biomes)[-1])],
+    by = c("ID", "Status")
+  ) %>%
+  dplyr::mutate(
+    BiomeID = BIOME,
+    Biome = factor(biome_names[BiomeID], levels = biome_names),
+    species_count = replace_na(species_count, 0)
+    )
 
 polygons_sf <- sf::st_as_sf(remerge)
 gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
@@ -795,7 +863,7 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "SInAS_donors_and_receivers.png"),
+  filename = file.path(dir_fig, "SInAS_donors_and_receivers.png"),
   plot = gg_dr,
   width = 13, height = 3
   )
@@ -933,7 +1001,7 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_main, "fig", "MaxAreaRichnessBoxplot.svg"),
+  filename = file.path(dir_fig, "MaxAreaRichnessBoxplot.svg"),
   plot = gg_area,
   width = 10, height = 4
 )
@@ -1020,13 +1088,18 @@ df_sPlotBiome <- sPlotVect %>%
     by = "BiomePatchID"
   )
 
-plot(Invasive_cover ~ log(total_area), data = df_sPlotBiome)
-mod <- lm(Invasive_cover ~ log(total_area), data = df_sPlotBiome)
-abline(a = coefficients(mod)[1], b = coefficients(mod)[2], col = "red", cex = 2)
+
+mod <- lm(Invasive_cover ~ log(total_area) + log(speciesRichnessBa), data = df_sPlotBiome)
+
 r2 <- summary(
-  lm(Invasive_cover ~ log(total_area) + log(speciesRichnessBa), data = df_sPlotBiome)
+  lm(Invasive_cover ~ log(total_area), data = df_sPlotBiome)
   )$adj.r.squared
-cat("Adjusted R2:", round(r2, 2))
+
+plot(
+  Invasive_cover ~ log(total_area),
+  data = df_sPlotBiome,
+  main = paste("Adjusted R2:", round(r2, 2)))
+abline(a = coefficients(mod)[1], b = coefficients(mod)[2], col = "red", cex = 2)
 
 
 #>=============================================================================<
@@ -1138,7 +1211,7 @@ abline(v = MuMIn::r.squaredGLMM(modInvasiveBreeder_bb)[1])
 
 
 modInvasiveBreeder_gam <- mgcv::gam(
-  cbind(DonorOf, failures) ~ s(log(Area), k = 3) + s(log(SpeciesRichness), k = 3),
+  cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3) + Biome,
   data = df_donor,
   method = "REML",
   family = stats::binomial("logit")
@@ -1148,24 +1221,334 @@ plot(modInvasiveBreeder_gam, pages = 1, shade = TRUE)
 summary(modInvasiveBreeder_gam)
 ecospat::ecospat.adj.D2.glm(modInvasiveBreeder_gam)
 
+
+# sequence across observed range
+newdata <- expand.grid(
+  SpeciesRichness = seq(min(df_donor$SpeciesRichness), max(df_donor$SpeciesRichness), length.out = 100),
+  Biome = levels(df_donor$Biome)
+)
+newdata$log_SpeciesRichness <- log(newdata$SpeciesRichness)
+
+pred <- predict(modInvasiveBreeder_gam, newdata, type = "response", se.fit = TRUE)
+newdata$fit <- pred$fit
+newdata$lower <- pred$fit - 1.96 * pred$se.fit
+newdata$upper <- pred$fit + 1.96 * pred$se.fit
+
+ggplot(newdata, aes(x = SpeciesRichness, y = fit, color = Biome, fill = Biome)) +
+  geom_line(colour = "black") +
+  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.1) +
+  labs(x = "Species Richness", y = "Predicted probability") +
+  theme_minimal()
+
+
+
+
+
+library("mgcViz")
+check_model <- function(mod) {
+  # simulate residuals for DHARMa
+  sim <- DHARMa::simulateResiduals(mod, plot = FALSE)
+  
+  # run tests
+  disp_test <- DHARMa::testDispersion(sim)
+  outlier_test <- DHARMa::testOutliers(sim)
+  uni_test <- DHARMa::testUniformity(sim)
+  
+  # count minor/major issues
+  minor <- sum(c(disp_test$p.value, uni_test$p.value) < 0.05)
+  major <- sum(c(outlier_test$p.value) < 0.05)
+  
+  if (minor == 0 && major == 0) {
+    return("OK")
+  } else {
+    paste0(
+      if (major > 0) paste0(major, " major issue", if (major > 1) "s" else "") else "",
+      if (major > 0 & minor > 0) ", " else "",
+      if (minor > 0) paste0(minor, " minor issue", if (minor > 1) "s" else "") else ""
+    )
+  }
+}
+
+pdf(file.path(dir_fig, "biome_response_curves.pdf"), width = 10, height = 5)
+par(
+  mfrow = c(1, 2),
+  mar = c(4, 4, 3, 1),   # inner margins
+  oma = c(0, 0, 4, 0)    # outer margins (TOP increased)
+)
 for (biome in sort(unique(df_donor$Biome))) {
-  mod <- stats::glm(
-    cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness),
-    data = df_donor[which(df_donor$Biome == biome),],
+  
+  df_sset <- df_donor[df_donor$Biome == biome, ]
+  n_patches <- dplyr::n_distinct(df_sset$PatchID)
+  
+  if (n_patches < 15) {
+    next
+  }
+  
+  # ----- GLM -----
+  mod_glm <- stats::glm(
+    cbind(DonorOf, failures) ~ log(SpeciesRichness),
+    data = df_sset,
     family = stats::quasibinomial()
   )
-  expl.deviance <- 1 - mod$deviance / mod$null.deviance
-  cat("\n\n\nBiome:", biome, "Explained Deviance:", expl.deviance)
-  print(summary(mod))
   
-  mod <- mgcv::gam(
-    cbind(DonorOf, failures) ~ s(log(Area), k = 3) + s(log(SpeciesRichness), k = 3),
-    data = df_donor[which(df_donor$Biome == biome),],
+  dev_glm <- 1 - mod_glm$deviance / mod_glm$null.deviance
+  
+  # ----- GAM -----
+  mod_gam <- mgcv::gam(
+    cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3),
+    data = df_sset,
     method = "REML",
     family = stats::binomial("logit")
   )
-  cat("GAM expl. D2:", ecospat::ecospat.adj.D2.glm(mod))
+  
+  dev_gam <- ecospat::ecospat.adj.D2.glm(mod_gam)
+  
+  # ----- Prediction grid -----
+  x_seq <- seq(
+    min(df_sset$SpeciesRichness, na.rm = TRUE),
+    max(df_sset$SpeciesRichness, na.rm = TRUE),
+    length.out = 100
+  )
+  
+  newdata <- data.frame(
+    SpeciesRichness = x_seq
+  )
+  
+  # GLM prediction
+  pred_glm <- predict(
+    mod_glm,
+    newdata = newdata,
+    type = "response"
+  )
+  
+  # GAM prediction
+  pred_gam <- predict(
+    mod_gam,
+    newdata = newdata,
+    type = "response"
+  )
+  
+  # Check models
+  mod_glm_check <- stats::glm(
+    cbind(DonorOf, failures) ~ log(SpeciesRichness),
+    data = df_sset,
+    family = stats::binomial()
+  )
+  
+  diag_glm <- check_model(mod_glm_check)
+  diag_gam <- check_model(mod_gam)
+  
+  # ----- Plot -----
+  ids <- unique(df_sset$PatchID)
+  
+  # plot base map
+  plot(biomes, border = "grey75")
+  
+  # highlight subset polygons
+  subset_polys <- biomes[biomes$ID %in% ids, ]
+  plot(subset_polys, col = "red", add = TRUE)
+  
+  # compute centroids
+  cent <- terra::centroids(subset_polys)
+  coords <- terra::crds(cent)
+  
+  # define an offset for arrows (adjust depending on map scale)
+  offset <- max(terra::ext(biomes)[2:3] - terra::ext(biomes)[1:2]) * 0.02
+  
+  # draw arrows from offset positions pointing to centroids
+  arrows(
+    x0 = coords[,1] + offset,
+    y0 = coords[,2] + offset,
+    x1 = coords[,1],
+    y1 = coords[,2],
+    length = 0.1,
+    col = "blue",
+    lwd = 2.5
+  )
+  
+  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
+  
+  # GLM plot
+  plot(
+    df_sset$SpeciesRichness,
+    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
+    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
+    xlab = "Species Richness",
+    ylab = "Probability",
+    main = paste0("GLM\nD² = ", round(dev_glm, 3), "\nModel checks:", diag_glm),
+    log = "x"
+  )
+  lines(x_seq, pred_glm, lwd = 2)
+  
+  # GAM plot
+  plot(
+    df_sset$SpeciesRichness,
+    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
+    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
+    xlab = "Species Richness",
+    ylab = "Probability",
+    main = paste0("GAM\nD² = ", round(dev_gam, 3), "\nModel checks:", diag_gam),
+    log = "x"
+  )
+  lines(x_seq, pred_gam, lwd = 2)
+  
+  # page title
+  mtext(
+    paste0("Biome: ", biome, "   |   N patches = ", n_patches),
+    outer = TRUE,
+    line = 1,
+    cex = 1.2
+  )
 }
+
+dev.off()
+
+
+
+
+
+for (i in 1:14) {
+  biome <- biome_names[i]
+  df_sset <- df_donor[df_donor$Biome == biome, ]
+  n_patches <- dplyr::n_distinct(df_sset$PatchID)
+  
+  if (n_patches < 15) {
+    next
+  }
+  
+  dev_glms <- c()
+  dev_gams <- c()
+  glms <- list()
+  gams <- list()
+  for (i in 1:30) {
+    # Number of bins along SpeciesRichness
+    n_bins <- 10
+    max_per_bin <- 3
+    
+    df_sset_sample <- df_sset %>%
+      mutate(bin = cut(SpeciesRichness, breaks = n_bins, include.lowest = TRUE)) %>%
+      group_by(bin) %>%
+      group_modify(~ slice_sample(.x, n = min(nrow(.x), max_per_bin)), .keep = FALSE) %>%
+      ungroup() %>%
+      select(-bin)
+    
+    # Check distribution
+    table(cut(df_sset_sample$SpeciesRichness, breaks = n_bins))
+    
+    # ----- GLM -----
+    mod_glm <- stats::glm(
+      cbind(DonorOf, failures) ~ log(SpeciesRichness),
+      data = df_sset_sample,
+      family = stats::quasibinomial()
+    )
+    
+    dev_glm <- 1 - mod_glm$deviance / mod_glm$null.deviance
+    dev_glms <- c(dev_glms, dev_glm)
+    glms[[i]] <- mod_glm
+    
+    # ----- GAM -----
+    mod_gam <- mgcv::gam(
+      cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3),
+      data = df_sset_sample,
+      method = "REML",
+      family = stats::binomial("logit")
+    )
+    
+    dev_gam <- ecospat::ecospat.adj.D2.glm(mod_gam)
+    dev_gams <- c(dev_gams, dev_gam)
+    gams[[i]] <- mod_gam
+  }
+  
+  hist(dev_glms)
+  hist(dev_gams)
+  
+  dev_glms[dev_glms > 1] <- 0
+  dev_gams[dev_gams > 1] <- 0
+  
+  x_seq <- seq(
+    min(df_sset$SpeciesRichness, na.rm = TRUE),
+    max(df_sset$SpeciesRichness, na.rm = TRUE),
+    length.out = 100
+  )
+  
+  newdata <- data.frame(
+    SpeciesRichness = x_seq
+  )
+  
+  # GLM plot
+  grDevices::svg(
+    filename = file.path(
+      "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/fig/model_tests",
+      paste0("GLM_", biome, ".svg")
+    ), width = 7, height = 5
+  )
+  plot(
+    df_sset$SpeciesRichness,
+    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
+    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
+    xlab = "Species Richness",
+    ylab = "Probability",
+    main = paste0(biome, ": GLM\nmean D² = ", round(mean(dev_glms), 2)),
+    log = "x"
+  )
+  
+  # GLM prediction
+  for (i in 1:length(glms)) {
+    pred_glm <- predict(
+      glms[[i]],
+      newdata = newdata,
+      type = "response"
+    )
+    lines(x_seq, pred_glm, lwd = 2, col = rgb(1, 0, 0, pmax(dev_glms[i], 0)))
+  }
+  dev.off()
+  
+  # GAM plot
+  grDevices::svg(
+    filename = file.path(
+      "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/fig/model_tests",
+      paste0("GAM_", biome, ".svg")
+      ), width = 7, height = 5
+  )
+  plot(
+    df_sset$SpeciesRichness,
+    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
+    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
+    xlab = "Species Richness",
+    ylab = "Probability",
+    main = paste0(biome, ": GAM\nD² = ", round(mean(dev_gams), 2)),
+    log = "x"
+  )
+  
+  # GAM prediction
+  for (i in 1:length(gams)) {
+    pred_gam <- predict(
+      gams[[i]],
+      newdata = newdata,
+      type = "response"
+    )
+    lines(x_seq, pred_gam, lwd = 2, col = rgb(0, 1, 0, pmax(dev_gams[i], 0)))
+  }
+  dev.off()
+}
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 df_donor$SpeciesRichness <- sample(df_donor$SpeciesRichness)
 df_donor$failures <- pmax(df_donor$SpeciesRichness - df_donor$DonorOf, 0) 
@@ -1300,24 +1683,7 @@ boot::boot.ci(boot_median, type = "perc")
 
 
 
-mod_richness <- lmer(
-  log(SpeciesRichness) ~ log(Area) + Productivity + Disturbance + (1 | Biome),
-  data = df
-)
 
-mod_donor <- glmmTMB(
-  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + Productivity + (1 | Biome),
-  family = betabinomial(),
-  data = df
-)
-
-mod_receiver <- glmmTMB(
-  InvasiveCount ~ log(SpeciesRichness) + Disturbance + HumanModification + (1 | Biome),
-  family = poisson(),
-  data = df
-)
-
-psem(mod_richness, mod_donor, mod_receiver)
 
 
 
