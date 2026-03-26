@@ -16,6 +16,7 @@ library("dplyr")
 library("tidyr")
 library("terra")
 library("tidyterra")
+library("rgbif")
 library("lme4")
 library("glmmTMB")
 library("boot")
@@ -67,7 +68,8 @@ if (Sys.info()["sysname"] == "Windows") {
 
 dir_dat <- file.path(dir_lud11, "poppman", "data", "bir", "dat", "lud11")
 dir_stats <- file.path(dir_main, "stats")
-dir_imed <- file.path(dir_dat, "biomes", biome_def, "intermediate_data", nativeness_source)
+dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")  # Only biome-level data
+dir_imed <- file.path(dir_dat, "biomes", biome_def, "intermediate_data", nativeness_source)  # Patch-level data
 dir_fig <- file.path(dir_main, "fig", nativeness_source)
 
 if (!dir.exists(dir_fig)) {
@@ -77,6 +79,7 @@ if (!dir.exists(dir_fig)) {
 # Invasive species data base files
 f_sinas_places <- file.path(dir_dat, "sinas", "SInAS_locations_3.1.gpkg")
 f_sinas_data <- file.path(dir_dat, "sinas", "SInAS_3.1.1.csv")
+f_sinas_taxon_match <- file.path(dir_dat, "sinas", "taxonomy_matching.csv")
 
 f_glonaf_places <- file.path(dir_dat, "glonaf", "glonaf_2024_regions", "glonaf_2024_regions.shp")
 f_glonaf_data <- file.path(dir_dat, "glonaf", "glonaf_flora2.csv")
@@ -86,9 +89,9 @@ f_glonaf_taxa <- file.path(dir_dat, "glonaf", "glonaf_taxon_wcvp.csv")
 f_biomes <- file.path(dir_dat, "biomes", biome_def, "biomes.shp")
 
 # Intermediate data files
-f_bbuff <- file.path(dir_imed, "biomes_buff.gpkg")
-f_berased <- file.path(dir_imed, "biomes_wout_mountains.gpkg") # Just w/out mountains for area calculation
-f_bfullinfo <- file.path(dir_imed, "biomes_full_info.gpkg") # Original biomes with added information
+f_bbuff <- file.path(dir_imeb, "biomes_buff.gpkg")
+f_berased <- file.path(dir_imeb, "biomes_wout_mountains.gpkg") # Just w/out mountains for area calculation
+f_bfullinfo <- file.path(dir_imeb, "biomes_full_info.gpkg") # Original biomes with added information
 f_out <- file.path(dir_imed, "df_species_patches.csv") # Output of invasive species assignment to patches
 
 # Miscancellous data files
@@ -102,7 +105,7 @@ f_bathymetrie <- file.path(
   )
 
 f_est_div <- file.path( # Species richness estimates
-  dir_imed, "biome_species_richness.csv"
+  dir_imeb, "biome_species_richness.csv"
   )
 
 f_gisd <- file.path(dir_dat, "db", "gisd_2026-02-25", "converted.csv")
@@ -159,10 +162,67 @@ glonaf_places <- terra::vect(
 )
 
 glonaf_taxa <- read.csv(f_glonaf_taxa, header = TRUE)
+
+if (!"taxon_gbif" %in% names(glonaf_taxa) | all(is.na(glonaf_taxa$taxon_gbif))) {
+  glonaf_taxa$taxon_gbif <- NA
+  failures <- c()
+  pb <- progress::progress_bar$new(total = nrow(glonaf_taxa))
+  for (i in 1:nrow(glonaf_taxa)) {
+    taxon_i <- glonaf_taxa$taxa_and_authors_accepted[i]
+    if (is.na(taxon_i)) {
+      taxon_i <- glonaf_taxa$taxon_corrected[i]
+    }
+    gbif_match <- rgbif::name_backbone(
+      name = taxon_i,
+      rank = glonaf_taxa$wcvp_taxon_rank[i]
+    )
+    exact <- dplyr::filter(gbif_match, matchType == "EXACT")
+    if (nrow(exact) == 1) {
+      glonaf_taxa$taxon_gbif[i] <- exact$canonicalName[1]
+      cat("Matched")
+    } else {
+      failures <- c(failures, i)
+      #cat("\nFailed for taxon", glonaf_taxa$taxa_and_authors_accepted[i])
+    }
+    pb$tick()
+  }
+  pb <- progress::progress_bar$new(total = length(failures))
+  for (i in failures) {
+    taxon_i <- glonaf_taxa$taxa_and_authors_accepted[i]
+    if (is.na(taxon_i)) {
+      taxon_i <- glonaf_taxa$taxon_corrected[i]
+    }
+    gbif_match <- rgbif::name_backbone(
+      name = taxon_i,
+      rank = "Species"
+    )
+    exact <- dplyr::filter(gbif_match, matchType == "EXACT")
+    if (nrow(exact) == 1) {
+      glonaf_taxa$taxon_gbif[i] <- exact$canonicalName[1]
+      cat("Matched")
+    } else {
+      #cat("\nFailed for taxon", glonaf_taxa$taxa_and_authors_accepted[i])
+    }
+    pb$tick()
+  }
+  rm(pb)
+  write.csv(glonaf_taxa, file = f_glonaf_taxa, row.names = FALSE)
+}
+
+glonaf_taxa <- glonaf_taxa %>%
+  dplyr::filter(!is.na(taxon_gbif))
+
 glonaf_data <- read.csv(f_glonaf_data, header = TRUE) %>%
   dplyr::mutate(
-    taxon = glonaf_taxa[match(id, glonaf_taxa$id), "taxon_corrected"]
-  )
+    taxon = glonaf_taxa[match(id, glonaf_taxa$id), "taxon_gbif"],
+    wcvp_taxon = glonaf_taxa[match(id, glonaf_taxa$id), "taxon_corrected"],
+    wcvp_taxon_short = stringr::str_extract(
+      glonaf_taxa[match(id, glonaf_taxa$id), "taxon_corrected"],
+      "^\\S+\\s+\\S+"
+      ),
+    rank = glonaf_taxa[match(id, glonaf_taxa$id), "wcvp_taxon_rank"]
+  ) #%>%
+  #dplyr::filter(rank == "Species") %>%  # Exclude subspecies
 
 tasmean <- terra::rast(f_tasmean)
 prec <- terra::rast(f_prec)
@@ -509,7 +569,14 @@ assign_patches <- function(
 }
 
 
-specs <- unique(sinas_data$taxon)
+if (nativeness_source == "sinas") {
+  specs <- unique(sinas_data$taxon)
+} else if (nativeness_source == "glonaf") {
+  specs <- unique(glonaf_data$taxon)
+} else {
+  specs <- tax_avail
+}
+
 
 # just to check how many names can be matched somehow
 # check_avail <- function(taxon) {
@@ -779,23 +846,23 @@ mod <- lm(
 
 anova(mod)
 
-coin::wilcox_test(
-  speciesRichnessBa ~ gist_100_worst | Biome,
-  data = ggdf,
-  distribution = "approximate"
-  )
-
-mod <- lme4::lmer(
-  log(speciesRichnessBa) ~ gist_100_worst + (1 | Biome),
-  data = ggdf
-  )
-summary(mod)
-sim_res <- DHARMa::simulateResiduals(mod)
-plot(sim_res)
-
-DHARMa::testUniformity(sim_res)
-DHARMa::testDispersion(sim_res)
-DHARMa::testOutliers(sim_res)
+# coin::wilcox_test(
+#   speciesRichnessBa ~ gist_100_worst | Biome,
+#   data = ggdf,
+#   distribution = "approximate"
+#   )
+# 
+# mod <- lme4::lmer(
+#   log(speciesRichnessBa) ~ gist_100_worst + (1 | Biome),
+#   data = ggdf
+#   )
+# summary(mod)
+# sim_res <- DHARMa::simulateResiduals(mod)
+# plot(sim_res)
+# 
+# DHARMa::testUniformity(sim_res)
+# DHARMa::testDispersion(sim_res)
+# DHARMa::testOutliers(sim_res)
 
 #confint(mod, parm = "gist_100_worstTRUE", method = "boot")
 #                            2.5 %    97.5 %
@@ -1143,10 +1210,13 @@ df_donor <- merged %>%
     DonorOf = Donor
   ) %>%
   dplyr::mutate(
-    PropInvasive = DonorOf / SpeciesRichness
+    PropInvasive = DonorOf / SpeciesRichness,
+    failures = pmax(SpeciesRichness - DonorOf, 0),
+    successRate = DonorOf / SpeciesRichness,
+    successProb = successRate / (1 - successRate)
   )
 
-df_donor$failures <- pmax(df_donor$SpeciesRichness - df_donor$DonorOf, 0)
+plot(log(successProb) ~ log(SpeciesRichness), data = df_donor)
 
 ## GLM that includes biome
 modInvasiveBreeder_glm <- stats::glm(
@@ -1563,7 +1633,6 @@ df_within <- merged %>%
   ) %>%
   dplyr::group_by(Species, Status) %>%
   dplyr::filter(
-    #Biome == MainOrigin,
     Count > 10,
     SpeciesRichness > 50
   ) %>%
