@@ -18,12 +18,14 @@ library("terra")
 library("tidyterra")
 library("rgbif")
 library("lme4")
+library("mgcv")
 library("glmmTMB")
 library("boot")
 library("coin")
 library("performance")
 library("MuMIn") # Alternative to performance
 library("DHARMa")
+library("collapse")
 library("future.apply")
 library("progressr")
 
@@ -54,7 +56,7 @@ biome_names <- c(
   "Rock and Ice"
 )
 
-nativeness_source <- "glonaf"
+nativeness_source <- "sinas"
 biome_def <- "olson"
 
 # Main directories
@@ -92,7 +94,7 @@ f_biomes <- file.path(dir_dat, "biomes", biome_def, "biomes.shp")
 f_bbuff <- file.path(dir_imeb, "biomes_buff.gpkg")
 f_berased <- file.path(dir_imeb, "biomes_wout_mountains.gpkg") # Just w/out mountains for area calculation
 f_bfullinfo <- file.path(dir_imeb, "biomes_full_info.gpkg") # Original biomes with added information
-f_out <- file.path(dir_imed, "df_species_patches.csv") # Output of invasive species assignment to patches
+f_out <- file.path(dir_imed, "df_species_patches.rds") # Output of invasive species assignment to patches
 
 # Miscancellous data files
 f_mountains <- file.path(
@@ -108,6 +110,14 @@ f_est_div <- file.path( # Species richness estimates
   dir_imeb, "biome_species_richness.csv"
   )
 
+f_env_dat <- file.path( # Environmental data
+  dir_imeb, "biomes_env.rds"
+)
+
+f_spl_eft <- file.path( # Total GBIF observation counts
+  dir_imeb, "sampling_effort.csv"
+)
+
 f_gisd <- file.path(dir_dat, "db", "gisd_2026-02-25", "converted.csv")
 f_100_worst <- file.path(
   dir_dat, "db", "gisd_2026-02-25", "100_of_the_Worlds_Worst.csv"
@@ -122,6 +132,9 @@ f_gadm <- file.path(
 )
 
 # Environmental raster data
+f_envstack <- file.path(
+  dir_lud11, "poppman/data/bir/dat/lud11/environment", "environmentPC.tif"
+)
 f_tasmean <- file.path(
   dir_lud11, "poppman/data/bir/dat/lud11/environment", "tasmean_clim.tif"
   )
@@ -224,6 +237,7 @@ glonaf_data <- read.csv(f_glonaf_data, header = TRUE) %>%
   ) #%>%
   #dplyr::filter(rank == "Species") %>%  # Exclude subspecies
 
+env_stack <- terra::rast(f_envstack)
 tasmean <- terra::rast(f_tasmean)
 prec <- terra::rast(f_prec)
 ghm <- terra::rast(f_ghm)
@@ -342,11 +356,21 @@ if (!"dECA" %in% names(biomes) | recompute) {
 }
 
 #>-----------------------------------------------------------------------------<
-#> Add species richness estimates
+#> Add species richness estimates (and sampling effort)
 est_div <- read.csv(f_est_div)
+spl_eff <- read.csv(f_spl_eft)
 
 biomes <- terra::vect(f_bfullinfo) %>%
-  terra::merge(est_div, by = "ID", all.x = TRUE)
+  dplyr::mutate(
+    clusterID = paste(
+      as.character(BIOME),
+      as.character(clusterIDmaxdist),
+      as.character(clusterIDbathy),
+      sep = "-"
+    )
+  ) %>%
+  terra::merge(est_div, by = "ID", all.x = TRUE) %>%
+  terra::merge(spl_eff, by = "ID", all.x = TRUE)
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
 
 vals <- biomes$speciesRichnessBa
@@ -513,6 +537,7 @@ assign_patches <- function(
   
   # Get climate and productivity variables
   if (load_spatial_data) {
+    env_stack <- terra::rast(f_envstack)
     tasmean <- terra::rast(f_tasmean)
     prec <- terra::rast(f_prec)
     ghm <- terra::rast(f_ghm)
@@ -522,10 +547,34 @@ assign_patches <- function(
   native_psum <- terra::extract(prec, native_obs, ID = FALSE)[, 1]
   native_ghm <- terra::extract(ghm, native_obs, ID = FALSE)[, 1]
   native_npp <- terra::extract(npp, native_obs, ID = FALSE)[, 1]
+  native_env <- terra::extract(env_stack, native_obs, ID = FALSE)
   intro_tasmean <- terra::extract(tasmean, introduced_obs, ID = FALSE)[, 1]
   intro_psum <- terra::extract(prec, introduced_obs, ID = FALSE)[, 1]
   intro_ghm <- terra::extract(ghm, introduced_obs, ID = FALSE)[, 1]
   intro_npp <- terra::extract(npp, introduced_obs, ID = FALSE)[, 1]
+  intro_env <- terra::extract(env_stack, introduced_obs, ID = FALSE)
+  
+  if ("swe" %in% names(native_env)) { # Fill zeros for areas w/out snowfall
+    native_env$swe <- tidyr::replace_na(native_env$swe, 0)
+    intro_env$swe <- tidyr::replace_na(intro_env$swe, 0)
+  }
+  
+  # Allow only complete observations for covariance matrix
+  complete_native_env <- native_env[complete.cases(native_env), , drop = FALSE]
+  if (nrow(complete_native_env) >= 2) {
+    Sigma_native <- cov(complete_native_env)
+  } else {
+    Sigma_native <- NA
+  }
+  centre_native <- colMeans(native_env, na.rm = TRUE)
+  
+  complete_intro_env <- intro_env[complete.cases(intro_env), , drop = FALSE]
+  if (nrow(complete_intro_env) >= 2) {
+    Sigma_introduced <- cov(complete_intro_env)
+  } else {
+    Sigma_introduced <- NA
+  }
+  centre_introduced <- colMeans(intro_env, na.rm = TRUE)
   
   # Create data frames
   df_origin <- data.frame(
@@ -541,6 +590,8 @@ assign_patches <- function(
     ghm = mean(native_ghm, na.rm = TRUE),
     npp = mean(native_npp, na.rm = TRUE)
   )
+  df_origin$centre <- rep(list(centre_native), nrow(df_origin))
+  df_origin$Sigma <- rep(list(Sigma_native), nrow(df_origin))
   
   df_destination <- data.frame(
     Species = rep(taxon, length(introduced_patches$ID)),
@@ -555,6 +606,8 @@ assign_patches <- function(
     ghm = mean(intro_ghm, na.rm = TRUE),
     npp = mean(intro_npp, na.rm = TRUE)
   )
+  df_destination$centre <- rep(list(centre_introduced), nrow(df_destination))
+  df_destination$Sigma <- rep(list(Sigma_introduced), nrow(df_destination))
   
   df <- rbind(df_origin, df_destination)
   orig_biomes <- df_origin %>%
@@ -596,7 +649,7 @@ if (nativeness_source == "sinas") {
 
 
 if (file.exists(f_out) & !recompute) {
-  df_species_patches <- read.csv(f_out)
+  df_species_patches <- readRDS(f_out)
 } else {
   progressr::handlers(global = TRUE)
   progressr::handlers("progress")
@@ -635,7 +688,7 @@ if (file.exists(f_out) & !recompute) {
     )
   })
   
-  write.csv(df_species_patches, file = f_out, row.names = FALSE)
+  saveRDS(df_species_patches, file = f_out)
 }
 
 
@@ -685,7 +738,7 @@ check_gist <- function(taxon, biome_patch_id) {
   }
 }
 
-f_out_gist <- sub("df_species_patches.csv", "df_species_patches_gist.csv", f_out)
+f_out_gist <- sub("df_species_patches.rds", "df_species_patches_gist.rds", f_out)
 if (!file.exists(f_out_gist)) {
   df_species_patches %>%
     dplyr::rowwise() %>%
@@ -704,12 +757,12 @@ if (!file.exists(f_out_gist)) {
       ),
       gist_100_worst = factor(Species %in% worst)
     ) %>%
-    write.csv(
+    saveRDS(
       file = f_out_gist
     )
 }
 
-df_species_patches <- read.csv(f_out_gist)
+df_species_patches <- readRDS(f_out_gist)
 
 
 #>=============================================================================<
@@ -721,14 +774,6 @@ merged <- terra::merge(
   as.data.frame(biomes),
   by = "ID",
   all.x = TRUE
-  ) %>%
-  dplyr::mutate(
-    clusterID = paste(
-      as.character(Biome),
-      as.character(clusterIDmaxdist),
-      as.character(clusterIDbathy),
-      sep = "-"
-    )
   ) %>%
   dplyr::mutate(
     total_area_km2 = total_area / 1e6,
@@ -1128,7 +1173,7 @@ sPlotVect <- sPlotData %>%
   )
 
 df_sPlotBiome <- sPlotVect %>%
-  dplyr::filter(!is.na(BiomePatchID)) %>%
+  dplyr::filter(!is.na(BiomePatchID), Naturalness == "Natural") %>%
   dplyr::group_by(BiomePatchID) %>%
   dplyr::summarise(
     Native_cover = stats::weighted.mean(
@@ -1153,25 +1198,234 @@ df_sPlotBiome <- sPlotVect %>%
       as.data.frame() %>%
       dplyr::mutate(BiomePatchID = ID),
     by = "BiomePatchID"
+  ) %>%
+  dplyr::mutate(
+    Biome = factor(BIOME, levels = 1:length(biome_names), labels = biome_names)
   )
 
 
-mod <- lm(Invasive_cover ~ log(total_area) + log(speciesRichnessBa), data = df_sPlotBiome)
+mod <- glm(
+  Invasive_cover ~ log(speciesRichnessBa) + Biome,
+  data = df_sPlotBiome
+  )
 
-r2 <- summary(
-  lm(Invasive_cover ~ log(total_area), data = df_sPlotBiome)
-  )$adj.r.squared
-
-plot(
-  Invasive_cover ~ log(total_area),
-  data = df_sPlotBiome,
-  main = paste("Adjusted R2:", round(r2, 2)))
-abline(a = coefficients(mod)[1], b = coefficients(mod)[2], col = "red", cex = 2)
+summary(mod)
 
 
 #>=============================================================================<
 #> Statistical analyses
 #<=============================================================================>
+
+save_bhattacharyya <- function(mu1, mu2, Sigma1, Sigma2) {
+  fail <- function(reason) {
+    list(value = NA_real_, reason = reason)
+  }
+  if (is.null(mu1) || is.null(mu2) || is.null(Sigma1) || is.null(Sigma2)) {
+    return(fail("null_input"))
+  }
+  
+  mu1 <- as.numeric(mu1)
+  mu2 <- as.numeric(mu2)
+  Sigma1 <- tryCatch(as.matrix(Sigma1), error = function(e) NULL)
+  Sigma2 <- tryCatch(as.matrix(Sigma2), error = function(e) NULL)
+  
+  if (is.null(Sigma1) || is.null(Sigma2)) {
+    return(fail("matrix_coercion_failed"))
+    }
+  
+  # Dimension checks
+  if (length(mu1) != length(mu2)) {
+    return(fail("mean_dim_mismatch"))
+    }
+  
+  if (
+    nrow(Sigma1) != ncol(Sigma1) ||
+    nrow(Sigma2) != ncol(Sigma2) ||
+    nrow(Sigma1) != length(mu1) ||
+    nrow(Sigma2) != length(mu2)
+  ) {
+    return(fail("cov_dim_mismatch"))
+    }
+  
+  if (
+    any(!is.finite(mu1)) ||
+    any(!is.finite(mu2)) ||
+    any(!is.finite(Sigma1)) ||
+    any(!is.finite(Sigma2))
+    ) {
+    return(fail("non_finite_values"))
+  }
+  
+  if (det(Sigma1) < 1e-12 || det(Sigma2) < 1e-12) {
+    return(fail("singular_covariance"))
+  }
+  
+  val <- tryCatch(
+    fpc::bhattacharyya.dist(mu1, mu2, Sigma1, Sigma2),
+    error = function(e) {NA_real_}
+  )
+  
+  if (is.na(val)) {
+    return(fail("numerical_failure"))
+  }
+  
+  if (!is.finite(val)) {
+    return(fail("infinite_result"))
+  }
+  
+  return(list(value = val, reason = "ok"))
+}
+
+env_dat <- readRDS(f_env_dat)
+env_df <- tibble::tibble(
+  ID = sapply(env_dat, function(x) x$ID),
+  patchMu = lapply(env_dat, function(x) x$mu),
+  patchSigma = lapply(env_dat, function(x) x$Sigma)
+)
+env_df$ID <- unlist(env_df$ID)
+
+merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE)
+
+df_invasion <- do.call(
+  rbind,
+  lapply(
+    X = unique(merged_env$Species),
+    FUN = function(species) {
+      donor <- merged_env %>%
+        dplyr::filter(
+          Species == species,
+          !is.na(speciesRichnessBa),
+          Status == "Donor"
+          )
+      
+      donor_stats <- donor %>%
+        dplyr::summarise(
+          modalBiome = collapse::fmode(Biome),
+          max_total_area_km2 = max(total_area_km2, na.rm = TRUE),
+          max_lowland_area_km2 = max(lowland_area_km2, na.rm = TRUE),
+          max_localECA = max(localECA, na.rm = TRUE),
+          max_clusterECA = max(clusterECA, na.rm = TRUE),
+          maxRichness = max(speciesRichnessBa, na.rm = TRUE)
+        )
+      native_environment <- donor %>%
+        dplyr::slice_head(n = 1) %>%
+        dplyr::select(centre, Sigma)
+      
+      receiver <- merged_env %>%
+        dplyr::filter(
+          Species == species,
+          !is.na(speciesRichnessBa),
+          Status == "Receiver"
+          ) %>%
+        dplyr::rowwise() %>%
+        dplyr::mutate(
+          Invaded = 1,
+          tmp = list(
+              save_bhattacharyya(
+              mu1 = patchMu,
+              mu2 = native_environment$centre[[1]],
+              Sigma1 = patchSigma,
+              Sigma2 = native_environment$Sigma[[1]]
+              )
+          ),
+          Bhattacharyya = as.numeric(tmp$value),
+          Bhattacharyya_reason = tmp$reason
+        )
+      
+      background <- merged_env %>%
+        dplyr::filter(
+          Species != species,
+          !is.na(speciesRichnessBa)
+          ) %>%
+        dplyr::distinct(ID, .keep_all = TRUE) %>%
+        dplyr::slice_sample(n = 100) %>%
+        dplyr::rowwise() %>%
+        dplyr::mutate(
+          Status = "absent",
+          Invaded = 0,
+          tmp = list(
+            save_bhattacharyya(
+              mu1 = patchMu,
+              mu2 = native_environment$centre[[1]],
+              Sigma1 = patchSigma,
+              Sigma2 = native_environment$Sigma[[1]]
+            )
+          ),
+          Bhattacharyya = as.numeric(tmp$value),
+          Bhattacharyya_reason = tmp$reason
+        )
+        
+      # Generate output data.frame
+      out <- dplyr::bind_rows(
+        receiver,
+        background
+      ) %>%
+        dplyr::select(
+          ID, clusterID,
+          Species, Biome, Count,
+          Status, Invaded,
+          total_area_km2, lowland_area_km2, localECA,
+          speciesRichnessBa, sampling_effort,
+          Bhattacharyya, Bhattacharyya_reason,
+          ) %>%
+        dplyr::mutate(
+          donor_modalBiome = donor_stats$modalBiome,
+          donor_max_total_area_km2 = donor_stats$max_total_area_km2,
+          donor_max_lowland_area_km2 = donor_stats$max_lowland_area_km2,
+          donor_max_localECA = donor_stats$max_localECA,
+          donor_max_clusterECA = donor_stats$max_clusterECA,
+          donor_maxRichness = donor_stats$maxRichness
+        )
+      
+      return(out)
+    }
+  )
+) %>%
+  dplyr::mutate(
+    areaRatio = localECA / donor_max_localECA,
+    richnessRatio = speciesRichnessBa / donor_maxRichness,
+    logAreaRatio = log(areaRatio),
+    logRichnessRatio = log(richnessRatio),
+    logBhattacharyya = log(Bhattacharyya),
+    logSpeciesRichnessBa = log(speciesRichnessBa)
+  ) %>%
+  as.data.frame()
+
+## Debugging/analytics
+reason_summary <- table(df_invasion$Bhattacharyya_reason)
+cat(
+  "Bhattacharyya distances computed for",
+  sum(df_invasion$Bhattacharyya_reason == "ok"), "of", nrow(df_invasion),
+  "observations (i.e.,",
+  round(100 * mean(df_invasion$Bhattacharyya_reason == "ok"), 1), "%).\n",
+  "Failure breakdown:\n"
+)
+print(reason_summary)
+
+hist(df_invasion$logBhattacharyya)
+hist(df_invasion$logSpeciesRichnessBa)
+hist(df_invasion$logRichnessRatio)
+
+df_mod <- df_invasion[stats::complete.cases(df_invasion),] %>%
+  dplyr::mutate(
+    
+  )
+mod_gam <- mgcv::gam(
+  Invaded ~ s(logBhattacharyya, k = 3) + s(logRichnessRatio, k = 3) + s(logAreaRatio, k = 3) + s(log(sampling_effort), k = 3),
+  data = df_mod,
+  #method = "REML",
+  family = stats::binomial("logit")
+)
+
+summary(mod_gam)
+
+ggplot(data = df_invasion, aes(y = log(total_area_km2), colour = factor(invaded))) +
+  geom_boxplot()
+
+
+
+
+
 
 df_donor <- merged %>%
   dplyr::mutate(
