@@ -35,6 +35,7 @@ library("progressr")
 #<=============================================================================>
 
 recompute <- FALSE
+set.seed(161)
 
 biome_names <- c(
   "(Sub)tropical Moist BLF",
@@ -1387,7 +1388,8 @@ df_invasion <- do.call(
     logAreaRatio = log(areaRatio),
     logRichnessRatio = log(richnessRatio),
     logBhattacharyya = log(Bhattacharyya),
-    logSpeciesRichnessBa = log(speciesRichnessBa)
+    logSpeciesRichnessBa = log(speciesRichnessBa),
+    logSamplingEffort = log(sampling_effort)
   ) %>%
   as.data.frame()
 
@@ -1402,25 +1404,197 @@ cat(
 )
 print(reason_summary)
 
-hist(df_invasion$logBhattacharyya)
-hist(df_invasion$logSpeciesRichnessBa)
-hist(df_invasion$logRichnessRatio)
+par(mfrow = c(2, 2))
+hist(df_invasion$logBhattacharyya, main = "Bhattacharyya (log transformed)")
+hist(df_invasion$logAreaRatio, main = "Area ratio (log transformed)")
+hist(df_invasion$logRichnessRatio, main = "Spechies richness ratio (log transformed)")
+hist(df_invasion$logSamplingEffort, main = "Sampling effort (log transformed)")
+par(mfrow = c(1, 1))
 
 df_mod <- df_invasion[stats::complete.cases(df_invasion),] %>%
   dplyr::mutate(
-    
+    Specieslvl = stringr::word(Species, 1, 2)
   )
+
 mod_gam <- mgcv::gam(
-  Invaded ~ s(logBhattacharyya, k = 3) + s(logRichnessRatio, k = 3) + s(logAreaRatio, k = 3) + s(log(sampling_effort), k = 3),
+  Invaded ~ s(logBhattacharyya, k = 3) +
+    s(logRichnessRatio, k = 3) +
+    s(logAreaRatio, k = 3) +
+    s(logSamplingEffort, k = 3) +
+    Biome,
   data = df_mod,
   #method = "REML",
   family = stats::binomial("logit")
 )
 
 summary(mod_gam)
+adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
 
-ggplot(data = df_invasion, aes(y = log(total_area_km2), colour = factor(invaded))) +
-  geom_boxplot()
+# Fit smaller models and compute explained deviance by predictor
+make_formula <- function(predictors, biome = TRUE) {
+  as.formula(
+    paste(
+      "Invaded ~", 
+      paste(sprintf("s(%s, %s = 3)", predictors, "k"), collapse = " + "),
+      ifelse(biome, " + Biome", "")
+    )
+  )
+}
+
+predictors <- c(
+  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort"
+  )
+df_pred_d2 <- data.frame()
+pb <- progress::progress_bar$new(total = length(predictors) + 1)
+for (i in 1:(length(predictors) + 1)) {
+  if (i > length(predictors)) {
+    p <- "Biome"
+    frml_p <- as.formula("Invaded ~ Biome")
+    frml_r <- make_formula(predictors, biome = FALSE)
+  } else {
+    p <- predictors[i]
+    frml_p <- make_formula(p, biome = FALSE)
+    frml_r <- make_formula(predictors[-i], biome = TRUE)
+  }
+  
+  cat(as.character(frml_r))
+  mod_r <- mgcv::gam(frml_r, data = df_mod, family = stats::binomial("logit"))
+  adjD2_other <- ecospat::ecospat.adj.D2.glm(mod_r)
+  
+  df_pred_d2 <- rbind(
+    df_pred_d2,
+    data.frame(
+      Predictor = p,
+      Delta_adjD2 = adjD2_full - adjD2_other
+    )
+  )
+  pb$tick()
+}
+rm(pb)
+
+df_pred_d2 <- rbind(
+  df_pred_d2 %>%
+    dplyr::mutate(
+      Predictor = sapply(
+        Predictor,
+        function(x) trimws(sub("log", "", gsub("([A-Z])", " \\1", x)))
+      )
+    ),
+  data.frame(
+    Predictor = c("Shared", "Unexplained"),
+    Delta_adjD2 = c(adjD2_full - sum(df_pred_d2$Delta_adjD2), 1 - adjD2_full)
+    )
+)
+
+gg_pie <- ggplot2::ggplot(
+  data = df_pred_d2,
+  ggplot2::aes(x = "", y = Delta_adjD2, fill = Predictor)
+  ) +
+  ggplot2::geom_bar(stat = "identity", width = 1) +
+  ggplot2::coord_polar("y", start = 0) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    axis.title.x = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_blank(),
+    axis.text.y = ggplot2::element_blank()
+    ) +
+  ggplot2::ggtitle("Explained Deviance")
+
+ggplot2::ggsave(
+  filename = file.path(dir_fig, "DevExplPie.svg"),
+  plot = gg_pie,
+  width = 5, height = 5
+  )
+
+mods_gam <- list()
+d2s_gam <- c()
+N <- 50
+pb <- progress::progress_bar$new(total = N)
+for (i in 1:N) {
+  set.seed(i)
+  df_ss <- df_mod %>%
+    dplyr::group_by(Specieslvl, Status) %>%
+    dplyr::sample_n(size = 1)
+  
+  mods_gam[[i]] <- mgcv::gam(
+    Invaded ~ s(logBhattacharyya, k = 3) +
+      s(logRichnessRatio, k = 3) +
+      s(logAreaRatio, k = 3) +
+      s(logSamplingEffort, k = 3) +
+      Biome,
+    data = df_ss,
+    family = stats::binomial("logit")
+  )
+  d2s_gam <- c(
+    d2s_gam,
+    ecospat::ecospat.adj.D2.glm(mods_gam[[i]])
+  )
+  pb$tick()
+}
+rm(pb)
+
+hist(d2s_gam)
+
+
+# Fit models to subsets of the data and plot response shapes
+vars <- c("logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort")
+means <- colMeans(df_mod[, vars], na.rm = TRUE)
+
+plot_dfs <- lapply(vars, function(v) {
+  x_seq <- seq(
+    min(df_mod[[v]], na.rm = TRUE),
+    max(df_mod[[v]], na.rm = TRUE),
+    length.out = 500
+  )
+  
+  newdata <- as.data.frame(as.list(means))[rep(1, 500), ]
+  newdata[[v]] <- x_seq
+  newdata$Biome <- df_mod$Biome[1]
+  
+  # predictions: matrix (rows = x, cols = models)
+  pred_mat <- sapply(
+    X = mods_gam,
+    FUN = function(m) {predict(m, newdata = newdata, type = "response")}
+    )
+  
+  # summary stats
+  data.frame(
+    x = x_seq,
+    mean = rowMeans(pred_mat, na.rm = TRUE),
+    lo = apply(pred_mat, 1, quantile, probs = 0.1, na.rm = TRUE),
+    hi = apply(pred_mat, 1, quantile, probs = 0.9, na.rm = TRUE),
+    variable = v
+  )
+})
+df_plot <- do.call(rbind, plot_dfs) %>%
+  dplyr::mutate(
+    Predictor = sapply(
+      variable,
+      function(x) trimws(sub("log", "", gsub("([A-Z])", " \\1", x)))
+      )
+  )
+
+gg_resp <- ggplot2::ggplot(df_plot, ggplot2::aes(x = x, y = mean)) +
+  ggplot2::geom_line(colour = rgb(0, 102/255, 102/255)) +
+  ggplot2::geom_ribbon(
+    ggplot2::aes(ymin = lo, ymax = hi),
+    alpha = 0.2, fill = rgb(0, 102/255, 102/255)
+    ) +
+  ggplot2::labs(
+    x = "Predictor value (log scaled)",
+    y = "Predicted invasion probability",
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::facet_wrap(. ~ Predictor, scales = "free_x")
+
+ggplot2::ggsave(
+  filename = file.path(dir_fig, "ResponseShapes.svg"),
+  plot = gg_resp,
+  width = 7, height = 5
+)
+
+
 
 
 
