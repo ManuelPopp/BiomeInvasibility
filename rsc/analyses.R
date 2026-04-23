@@ -22,6 +22,7 @@ library("mgcv")
 library("glmmTMB")
 library("boot")
 library("coin")
+library("rstatix")
 library("performance")
 library("MuMIn") # Alternative to performance
 library("DHARMa")
@@ -118,6 +119,8 @@ f_env_dat <- file.path( # Environmental data
 f_spl_eft <- file.path( # Total GBIF observation counts
   dir_imeb, "sampling_effort.csv"
 )
+
+f_climate_overlap <- file.path(dir_imeb, "climate_overlap.csv")
 
 f_gisd <- file.path(dir_dat, "db", "gisd_2026-02-25", "converted.csv")
 f_100_worst <- file.path(
@@ -357,9 +360,16 @@ if (!"dECA" %in% names(biomes) | recompute) {
 }
 
 #>-----------------------------------------------------------------------------<
-#> Add species richness estimates (and sampling effort)
+#> Add species richness estimates, climate stability, and sampling effort
 est_div <- read.csv(f_est_div)
 spl_eff <- read.csv(f_spl_eft)
+clim_stab <- read.csv(f_climate_overlap) %>%
+  dplyr::rename(
+    min_clim_similarity = pminolap,
+    clim_integral = pcumolap,
+    bottleneck_clim_integral = pcumbnolap,
+    min_clim_cluster_similarity = cminolap
+  )
 
 biomes <- terra::vect(f_bfullinfo) %>%
   dplyr::mutate(
@@ -371,7 +381,9 @@ biomes <- terra::vect(f_bfullinfo) %>%
     )
   ) %>%
   terra::merge(est_div, by = "ID", all.x = TRUE) %>%
-  terra::merge(spl_eff, by = "ID", all.x = TRUE)
+  terra::merge(spl_eff, by = "ID", all.x = TRUE) %>%
+  terra::merge(clim_stab, by = "ID", all.x = TRUE)
+
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
 
 vals <- biomes$speciesRichnessBa
@@ -1020,7 +1032,6 @@ boxplot_data <- merged %>%
   dplyr::ungroup()
 
 # Calculate statistics
-library("rstatix")
 ## Calculate statistics with log-scale aware positioning
 metric_max_values <- boxplot_data %>%
   dplyr::group_by(metric) %>%
@@ -1206,7 +1217,8 @@ df_sPlotBiome <- sPlotVect %>%
 
 
 mod <- glm(
-  Invasive_cover ~ log(speciesRichnessBa) + Biome,
+  Invasive_cover ~ log(speciesRichnessBa) + bottleneck_clim_integral +
+    log(sampling_effort) + Biome,
   data = df_sPlotBiome
   )
 
@@ -1285,7 +1297,10 @@ env_df <- tibble::tibble(
 )
 env_df$ID <- unlist(env_df$ID)
 
-merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE)
+merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
+  dplyr::rename(
+    climateStability = bottleneck_clim_integral # Here, we select our metric for climate stability we want to use to proceed
+  )
 
 df_invasion <- do.call(
   rbind,
@@ -1306,7 +1321,8 @@ df_invasion <- do.call(
           max_lowland_area_km2 = max(lowland_area_km2, na.rm = TRUE),
           max_localECA = max(localECA, na.rm = TRUE),
           max_clusterECA = max(clusterECA, na.rm = TRUE),
-          maxRichness = max(speciesRichnessBa, na.rm = TRUE)
+          maxRichness = max(speciesRichnessBa, na.rm = TRUE),
+          max_climateStability = max(climateStability, na.rm = TRUE)
         )
       native_environment <- donor %>%
         dplyr::slice_head(n = 1) %>%
@@ -1368,6 +1384,7 @@ df_invasion <- do.call(
           total_area_km2, lowland_area_km2, localECA,
           speciesRichnessBa, sampling_effort,
           Bhattacharyya, Bhattacharyya_reason,
+          climateStability
           ) %>%
         dplyr::mutate(
           donor_modalBiome = donor_stats$modalBiome,
@@ -1375,7 +1392,8 @@ df_invasion <- do.call(
           donor_max_lowland_area_km2 = donor_stats$max_lowland_area_km2,
           donor_max_localECA = donor_stats$max_localECA,
           donor_max_clusterECA = donor_stats$max_clusterECA,
-          donor_maxRichness = donor_stats$maxRichness
+          donor_maxRichness = donor_stats$maxRichness,
+          donor_maxClimateStability = max(climateStability, na.rm = TRUE)
         )
       
       return(out)
@@ -1410,16 +1428,21 @@ hist(df_invasion$logAreaRatio, main = "Area ratio (log transformed)")
 hist(df_invasion$logRichnessRatio, main = "Spechies richness ratio (log transformed)")
 hist(df_invasion$logSamplingEffort, main = "Sampling effort (log transformed)")
 par(mfrow = c(1, 1))
+hist(df_invasion$climateStability, main = "Climate stability")
 
 df_mod <- df_invasion[stats::complete.cases(df_invasion),] %>%
   dplyr::mutate(
     Specieslvl = stringr::word(Species, 1, 2)
+  ) %>%
+  dplyr::filter(
+    as.numeric(Biome) <= 14
   )
 
 mod_gam <- mgcv::gam(
   Invaded ~ s(logBhattacharyya, k = 3) +
     s(logRichnessRatio, k = 3) +
     s(logAreaRatio, k = 3) +
+    s(climateStability, k = 3) +
     s(logSamplingEffort, k = 3) +
     Biome,
   data = df_mod,
@@ -1442,7 +1465,8 @@ make_formula <- function(predictors, biome = TRUE) {
 }
 
 predictors <- c(
-  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort"
+  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort",
+  "climateStability"
   )
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
@@ -1461,11 +1485,15 @@ for (i in 1:(length(predictors) + 1)) {
   mod_r <- mgcv::gam(frml_r, data = df_mod, family = stats::binomial("logit"))
   adjD2_other <- ecospat::ecospat.adj.D2.glm(mod_r)
   
+  mod_p <- mgcv::gam(frml_p, data = df_mod, family = stats::binomial("logit"))
+  adjD2_single <- ecospat::ecospat.adj.D2.glm(mod_p)
+  
   df_pred_d2 <- rbind(
     df_pred_d2,
     data.frame(
       Predictor = p,
-      Delta_adjD2 = adjD2_full - adjD2_other
+      Delta_adjD2 = adjD2_full - adjD2_other,
+      single_adjD2 = adjD2_single
     )
   )
   pb$tick()
@@ -1482,7 +1510,8 @@ df_pred_d2 <- rbind(
     ),
   data.frame(
     Predictor = c("Shared", "Unexplained"),
-    Delta_adjD2 = c(adjD2_full - sum(df_pred_d2$Delta_adjD2), 1 - adjD2_full)
+    Delta_adjD2 = c(adjD2_full - sum(df_pred_d2$Delta_adjD2), 1 - adjD2_full),
+    single_adjD2 = c(NA, NA)
     )
 )
 
@@ -1538,7 +1567,9 @@ hist(d2s_gam)
 
 
 # Fit models to subsets of the data and plot response shapes
-vars <- c("logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort")
+vars <- c(
+  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort"
+  )
 means <- colMeans(df_mod[, vars], na.rm = TRUE)
 
 plot_dfs <- lapply(vars, function(v) {
