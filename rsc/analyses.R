@@ -329,6 +329,10 @@ if (file.exists(f_bfullinfo) & !recompute) {
 }
 
 # Get biome patch connectivity
+## Note: Connectedness is calculated as the distance-weighted area of all other
+## patches of the same biome with an exponential decay function. A combined
+## measure of "local ECA" could be simply the sum of patch area and
+## distance-weighted neighbour patch area: focalECA = connectedness + area
 if (!"dECA" %in% names(biomes) | recompute) {
   for (biome_id in unique(biomes$BIOME)) {
     cmd <- paste("Rscript get_dECA.R", biome_id)
@@ -352,15 +356,19 @@ if (!"dECA" %in% names(biomes) | recompute) {
     stop("Duplicates in dECA file biome patch IDs found.")
   }
   
-  biomes <- terra::merge(
+  terra::merge(
     terra::vect(f_bfullinfo),
     dat,
     by = "ID",
     all.x = TRUE
-  ) %>% terra::writeVector(
-    filename = f_bfullinfo,
-    overwrite = TRUE
-  )
+  ) %>%
+    dplyr::mutate(
+      focalECA = max(total_area, 0, na.rm = TRUE) + connectedness
+    ) %>%
+    terra::writeVector(
+      filename = f_bfullinfo,
+      overwrite = TRUE
+      )
 }
 
 #>-----------------------------------------------------------------------------<
@@ -980,7 +988,7 @@ values(remerge) <- biomes %>%
 polygons_sf <- sf::st_as_sf(remerge)
 gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
-  ggplot2::geom_sf(aes(fill = species_count)) +
+  ggplot2::geom_sf(ggplot2::aes(fill = species_count)) +
   ggplot2::facet_wrap(~ Status, ncol = 2) +
   ggplot2::scale_fill_viridis_c(
     name = "Species count",
@@ -1000,11 +1008,12 @@ ggplot2::ggsave(
   width = 13, height = 3
   )
 
+
 #-------------------------------------------------------------------------------
 # Plot boxplots
 boxplot_data <- merged %>%
   dplyr::select(
-    Species, Status, lowland_area_km2, speciesRichnessBa
+    Species, Status, lowland_area_km2, speciesRichnessBa, focalECA
   ) %>%
   dplyr::group_by(Species, Status) %>%
   dplyr::summarise(
@@ -1018,14 +1027,22 @@ boxplot_data <- merged %>%
     ) NA else max(
       speciesRichnessBa, na.rm = TRUE
     ),
+    max_focalECA_m2 = if(
+      all(is.na(focalECA))
+    ) NA else max(
+      focalECA, na.rm = TRUE
+    ),
     .groups = "drop"
   ) %>%
-  dplyr::mutate(max_lowland_1e3km2 = max_lowland_km2 / 1e3) %>%
+  dplyr::mutate(
+    max_lowland_1e3km2 = max_lowland_km2 / 1e3,
+    max_focalECA = max_focalECA_m2 / 1e9
+    ) %>%
   dplyr::group_by(Species) %>%
   dplyr::filter(n() == 2) %>%
   dplyr::ungroup() %>%
   tidyr::pivot_longer(
-    cols = c(max_lowland_1e3km2, max_richness),
+    cols = c(max_lowland_1e3km2, max_richness, max_focalECA),
     names_to = "metric",
     values_to = "value"
   ) %>%
@@ -1044,7 +1061,8 @@ metric_max_values <- boxplot_data %>%
   dplyr::group_by(metric) %>%
   dplyr::summarise(
     max_value = max(value, na.rm = TRUE),
-    log_max_value = log10(max(value, na.rm = TRUE))
+    log_max_value = log10(max(value, na.rm = TRUE)),
+    place_low = median(value, na.rm = TRUE) < (max(value, na.rm = TRUE) / 2)
   )
 
 ## Wilcoxon test
@@ -1079,14 +1097,18 @@ stats <- test_res %>%
     .y. = "value"
   ) %>%
   dplyr::select(
-    metric, group1, group2, statistic, p, effsize, label, y.position, .y.
+    metric, group1, group2, statistic, p, effsize, label, y.position, .y.,
+    place_low
   ) %>%
   tidyr::pivot_longer(
     cols = c(group1, group2),
     names_to = "Group",
     values_to = "Status"
   ) %>%
-  dplyr::mutate(value = y.position)
+  dplyr::mutate(
+    value = y.position,
+    place_low = place_low
+    )
 
 ## Simple boxplots by Status (facetted by metric)
 gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Status)) +
@@ -1096,7 +1118,8 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
     labeller = as_labeller(
       c(
         "max_lowland_1e3km2" = "Maximum Lowland Area",
-        "max_richness" = "Maximum Species Richness"
+        "max_richness" = "Maximum Species Richness",
+        "max_focalECA" = "Maximum Connected Area"
       )
     )
   ) +
@@ -1120,8 +1143,9 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   ) +
   ggplot2::geom_text(
     data = stats,
-    ggplot2::aes(x = 1.5, label = label),
-    vjust = 4.5
+    ggplot2::aes(
+      x = 1.5, label = label, vjust = ifelse(place_low, 4.5, 2)
+      )
     ) +
   ggplot2::scale_y_continuous(
     breaks = c(1e-2, 1, 1e2, 1e4),
@@ -1227,7 +1251,8 @@ df_sPlotBiome <- sPlotVect %>%
     ) %>%
   dplyr::mutate(
     log_speciesRichnessBa = log(speciesRichnessBa),
-    log_sampling_effort = log(sampling_effort)
+    log_sampling_effort = log(sampling_effort),
+    log_Connectedness = log(connectedness)
   ) %>%
   as.data.frame()
 
@@ -1252,20 +1277,25 @@ df_sPlotBiome <- sPlotVect %>%
 # GAM per biome
 bt <- table(df_sPlotBiome$Biome)
 
-par(mfrow = c(1, 3))
+par(mfrow = c(2, 2))
 for (b in names(bt[bt > 10])) {
   sdf <- df_sPlotBiome[which(df_sPlotBiome$Biome == b), ]
   mod <- mgcv::gam(
-    Invasive_cover ~ s(log_speciesRichnessBa, k = 3) +
+    Invasive_cover ~
+      s(log_speciesRichnessBa, k = 3) +
       s(bottleneck_clim_integral, k = 3) +
+      s(log_Connectedness, k = 3) +
       s(log_sampling_effort, k = 3),
     family = quasibinomial(link = "logit"),
     data = sdf
   )
   sm <- summary(mod)
   cat(b, sm$dev.expl, "(GAM)\n")
+  
   vars <- c(
-    "log_speciesRichnessBa", "bottleneck_clim_integral", "log_sampling_effort")
+    "log_speciesRichnessBa", "bottleneck_clim_integral", "log_sampling_effort",
+    "log_Connectedness"
+    )
   
   for (v in vars) {
     x <- sdf[[v]]
@@ -1275,7 +1305,8 @@ for (b in names(bt[bt > 10])) {
     grid <- data.frame(
       log_speciesRichnessBa = mean(sdf$log_speciesRichnessBa, na.rm = TRUE),
       bottleneck_clim_integral = mean(sdf$bottleneck_clim_integral, na.rm = TRUE),
-      log_sampling_effort = mean(sdf$log_sampling_effort, na.rm = TRUE)
+      log_sampling_effort = mean(sdf$log_sampling_effort, na.rm = TRUE),
+      log_Connectedness = mean(sdf$log_Connectedness, na.rm = TRUE)
     )
     
     xseq <- seq(rng[1], rng[2], length.out = 100)
@@ -1292,6 +1323,7 @@ for (b in names(bt[bt > 10])) {
   }
 }
 par(mfrow = c(1, 1))
+
 
 #>=============================================================================<
 #> Statistical analyses
@@ -1387,8 +1419,8 @@ df_invasion <- do.call(
           modalBiome = collapse::fmode(Biome),
           max_total_area_km2 = max(total_area_km2, na.rm = TRUE),
           max_lowland_area_km2 = max(lowland_area_km2, na.rm = TRUE),
-          max_localECA = max(localECA, na.rm = TRUE),
-          max_clusterECA = max(clusterECA, na.rm = TRUE),
+          max_focalECA = max(focalECA, na.rm = TRUE),
+          max_connectedness = max(connectedness, na.rm = TRUE),
           maxRichness = max(speciesRichnessBa, na.rm = TRUE),
           max_climateStability = max(climateStability, na.rm = TRUE)
         )
@@ -1449,7 +1481,7 @@ df_invasion <- do.call(
           ID, clusterID,
           Species, Biome, Count,
           Status, Invaded,
-          total_area_km2, lowland_area_km2, localECA,
+          total_area_km2, lowland_area_km2, focalECA,
           speciesRichnessBa, sampling_effort,
           Bhattacharyya, Bhattacharyya_reason,
           climateStability
@@ -1458,8 +1490,8 @@ df_invasion <- do.call(
           donor_modalBiome = donor_stats$modalBiome,
           donor_max_total_area_km2 = donor_stats$max_total_area_km2,
           donor_max_lowland_area_km2 = donor_stats$max_lowland_area_km2,
-          donor_max_localECA = donor_stats$max_localECA,
-          donor_max_clusterECA = donor_stats$max_clusterECA,
+          donor_max_focalECA = donor_stats$max_focalECA,
+          donor_max_connectedness = donor_stats$max_connectedness,
           donor_maxRichness = donor_stats$maxRichness,
           donor_maxClimateStability = max(climateStability, na.rm = TRUE)
         )
@@ -1469,7 +1501,7 @@ df_invasion <- do.call(
   )
 ) %>%
   dplyr::mutate(
-    areaRatio = localECA / donor_max_localECA,
+    areaRatio = focalECA / donor_max_focalECA,
     richnessRatio = speciesRichnessBa / donor_maxRichness,
     logAreaRatio = log(areaRatio),
     logRichnessRatio = log(richnessRatio),
@@ -1519,7 +1551,8 @@ make_formula <- function(predictors, biome = TRUE) {
 
 ## Full model
 predictors <- c(
-  "logBhattacharyya", "logRichnessRatio", #"logAreaRatio",
+  "logBhattacharyya",# "logRichnessRatio",
+  "logAreaRatio",
   "logSamplingEffort",
   "climateStability"
 )
@@ -1535,6 +1568,9 @@ mod_gam <- mgcv::gam(
 
 summary(mod_gam)
 adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
+
+mgcv::gam.check(mod_gam)
+mgcv::concurvity(mod_gam)
 
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
@@ -1594,9 +1630,22 @@ gg_pie <- ggplot2::ggplot(
     axis.title.x = ggplot2::element_blank(),
     axis.title.y = ggplot2::element_blank(),
     axis.text.x = ggplot2::element_blank(),
-    axis.text.y = ggplot2::element_blank()
+    axis.text.y = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_blank()
     ) +
-  ggplot2::ggtitle("Explained Deviance")
+  ggplot2::ggtitle("Explained Deviance") +
+  ggplot2::scale_fill_manual(
+    values = c(
+      rgb(0, 102/255, 102/255),
+      "red",
+      "green",
+      rgb(70/255, 100/255, 170/255),
+      "yellow",
+      "orange",
+      #"grey25",
+      "grey75"
+    )
+  )
 
 ggplot2::ggsave(
   filename = file.path(dir_fig, "DevExplPie.svg"),
@@ -1615,11 +1664,7 @@ for (i in 1:N) {
     dplyr::sample_n(size = 1)
   
   mods_gam[[i]] <- mgcv::gam(
-    Invaded ~ s(logBhattacharyya, k = 3) +
-      s(logRichnessRatio, k = 3) +
-      s(logAreaRatio, k = 3) +
-      s(logSamplingEffort, k = 3) +
-      Biome,
+    frml_full,
     data = df_ss,
     family = stats::binomial("logit")
   )
@@ -1635,12 +1680,9 @@ hist(d2s_gam)
 
 
 # Fit models to subsets of the data and plot response shapes
-vars <- c(
-  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort"
-  )
-means <- colMeans(df_mod[, vars], na.rm = TRUE)
+means <- colMeans(df_mod[, predictors], na.rm = TRUE)
 
-plot_dfs <- lapply(vars, function(v) {
+plot_dfs <- lapply(predictors, function(v) {
   x_seq <- seq(
     min(df_mod[[v]], na.rm = TRUE),
     max(df_mod[[v]], na.rm = TRUE),
@@ -1666,6 +1708,7 @@ plot_dfs <- lapply(vars, function(v) {
     variable = v
   )
 })
+
 df_plot <- do.call(rbind, plot_dfs) %>%
   dplyr::mutate(
     Predictor = sapply(
@@ -1717,7 +1760,7 @@ df_donor <- merged %>%
     Count == max(Count)
     ) %>%
   dplyr::group_by(
-    Biome, PatchID, Area, OlsonArea, dECA, localECA, clusterECA,
+    Biome, PatchID, Area, OlsonArea, dECA, focalECA, connectedness,
     SpeciesRichness, Status
     ) %>%
   dplyr::summarise(
@@ -1726,7 +1769,7 @@ df_donor <- merged %>%
   ) %>%
   tidyr::pivot_wider(
     id_cols = c(
-      Biome, PatchID, Area, OlsonArea, dECA, localECA, clusterECA,
+      Biome, PatchID, Area, OlsonArea, dECA, focalECA, connectedness,
       SpeciesRichness
       ),
     names_from = Status,
@@ -2167,8 +2210,8 @@ df_within <- merged %>%
   dplyr::summarise(
     Count = sum(Count),
     clusterRichness = max(speciesRichnessBa, na.rm = TRUE),
-    localECA = max(localECA, na.rm = TRUE),
-    clusterECA = max(clusterECA, na.rm = TRUE),
+    focalECA = max(focalECA, na.rm = TRUE),
+    connectedness = max(connectedness, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   dplyr::group_by(BiomeID, Biome, Species, Status) %>%
@@ -2241,10 +2284,10 @@ boot::boot.ci(boot_median, type = "perc")
 
 # Same for cluster ECA
 df_wide_ECA <- df_within %>%
-  dplyr::select(Biome, Species, Status, clusterECA) %>%
+  dplyr::select(Biome, Species, Status, connectedness) %>%
   tidyr::pivot_wider(
     names_from = Status,
-    values_from = clusterECA
+    values_from = connectedness
   ) %>%
   dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
   dplyr::mutate(diff = Donor - Receiver)

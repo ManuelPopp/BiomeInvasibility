@@ -56,9 +56,12 @@ get_deca_i <- function(i) {
 dECA <- sapply(seq_len(length(areas)), get_deca_i)
 
 # Compute connectedness of each patch (distance-weighted area of neighbour patches)
-patch_connectedness <- sapply(seq_along(areas), function(i) {
-  sum(areas[-i] * exp(-dist_mat[i, -i] * alpha))
-})
+patch_connectedness <- sapply(
+  seq_along(areas),
+  function(i) {
+    sum(areas[-i] * exp(-dist_mat[i, -i] * alpha))
+    }
+  )
 
 # Assign clusters based on a distance threshold
 f <- 0.5
