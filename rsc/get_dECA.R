@@ -36,7 +36,7 @@ dist_mat <- biomes_sub %>%
   units::drop_units()
 
 # Get areas
-areas <- terra::expanse(biomes_sub)
+areas <- terra::expanse(biomes_sub, unit = "m")
 
 # Define connectivity (exponential decay)
 alpha <- 0.67 / 1e6
@@ -57,7 +57,7 @@ dECA <- sapply(seq_len(length(areas)), get_deca_i)
 
 # Compute connectedness of each patch (distance-weighted area of neighbour patches)
 patch_connectedness <- sapply(seq_along(areas), function(i) {
-  sum(areas[-i] * exp(-dist_mat[i, -i] / alpha))
+  sum(areas[-i] * exp(-dist_mat[i, -i] * alpha))
 })
 
 # Assign clusters based on a distance threshold
