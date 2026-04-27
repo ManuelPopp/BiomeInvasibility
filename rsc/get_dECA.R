@@ -13,11 +13,20 @@ if (Sys.info()["sysname"] == "Windows") {
   lud11 <- "/lud11"
 }
 
-biomes <- terra::vect(
-  file.path(lud11, "poppman/data/bir/dat/lud11/shp/olson_ecoregions/biomes.shp")
-  )
-biomes$ID <- 1:nrow(biomes)
+biome_def <- "olson"
 
+dir_dat <- file.path(lud11, "poppman", "data", "bir", "dat", "lud11")
+dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")
+
+if (biome_def == "olson") {
+  biomes <- terra::vect(
+    file.path(lud11, "poppman/data/bir/dat/lud11/shp/olson_ecoregions/biomes.shp")
+  )
+} else {
+  stop("Biome input file not defined.")
+}
+
+biomes$ID <- 1:nrow(biomes)
 biomes_sub <- dplyr::filter(biomes, BIOME == biome_id)
 
 dist_mat <- biomes_sub %>%
@@ -46,9 +55,9 @@ get_deca_i <- function(i) {
 
 dECA <- sapply(seq_len(length(areas)), get_deca_i)
 
-# Compute local "weighted ECA" for each patch
-loECA <- sapply(seq_along(areas), function(i) {
-  sum(areas * exp(-dist_mat[i, ] / alpha))
+# Compute connectedness of each patch (distance-weighted area of neighbour patches)
+patch_connectedness <- sapply(seq_along(areas), function(i) {
+  sum(areas[-i] * exp(-dist_mat[i, -i] / alpha))
 })
 
 # Assign clusters based on a distance threshold
@@ -73,7 +82,7 @@ for (cl in unique(clusters)) {
 dECA_df <- data.frame(
   ID = biomes_sub$ID,
   dECA = dECA,
-  localECA = loECA,
+  connectedness = patch_connectedness,
   clusterECA = clECA,
   cluster = clusters
 )
@@ -81,7 +90,7 @@ dECA_df <- data.frame(
 write.csv(
   dECA_df,
   file = file.path(
-    lud11, "poppman", "tmp", "dECA", paste0("biome", biome_id, ".csv")
+    dir_imeb, "dECA", paste0("biome", biome_id, ".csv")
     ),
   row.names = FALSE
 )

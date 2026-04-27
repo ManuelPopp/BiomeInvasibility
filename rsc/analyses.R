@@ -1,6 +1,6 @@
 #>=============================================================================<
 #>-----------------------------------------------------------------------------<
-#> Analysis based on GBIF data of SINAS and GloNAF-listed (invasive) species
+#> Analysis based on GBIF data of SINAS or GloNAF-listed (invasive) species
 #> 
 #> Date: 2026-01-27
 #> Author: Popp, MR
@@ -118,6 +118,10 @@ f_env_dat <- file.path( # Environmental data
 
 f_spl_eft <- file.path( # Total GBIF observation counts
   dir_imeb, "sampling_effort.csv"
+)
+
+f_hum_mod <- file.path(
+  dir_imeb, "human_modification.csv"
 )
 
 f_climate_overlap <- file.path(dir_imeb, "climate_overlap.csv")
@@ -335,7 +339,7 @@ if (!"dECA" %in% names(biomes) | recompute) {
     rbind,
     lapply(
       X = list.files(
-        file.path(dir_imed, "dECA"),
+        file.path(dir_imeb, "dECA"),
         pattern = ".csv",
         full.names = TRUE
         ),
@@ -360,9 +364,11 @@ if (!"dECA" %in% names(biomes) | recompute) {
 }
 
 #>-----------------------------------------------------------------------------<
-#> Add species richness estimates, climate stability, and sampling effort
+#> Add species richness estimates, climate stability, sampling effort, etc
 est_div <- read.csv(f_est_div)
 spl_eff <- read.csv(f_spl_eft)
+hum_mod <- read.csv(f_hum_mod)
+
 clim_stab <- read.csv(f_climate_overlap) %>%
   dplyr::rename(
     min_clim_similarity = pminolap,
@@ -382,6 +388,7 @@ biomes <- terra::vect(f_bfullinfo) %>%
   ) %>%
   terra::merge(est_div, by = "ID", all.x = TRUE) %>%
   terra::merge(spl_eff, by = "ID", all.x = TRUE) %>%
+  terra::merge(hum_mod, by = "ID", all.x = TRUE) %>%
   terra::merge(clim_stab, by = "ID", all.x = TRUE)
 
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
@@ -1213,17 +1220,78 @@ df_sPlotBiome <- sPlotVect %>%
   ) %>%
   dplyr::mutate(
     Biome = factor(BIOME, levels = 1:length(biome_names), labels = biome_names)
+  ) %>%
+  dplyr::filter(
+    as.numeric(Biome) < 14,
+    speciesRichnessBa > 30
+    ) %>%
+  dplyr::mutate(
+    log_speciesRichnessBa = log(speciesRichnessBa),
+    log_sampling_effort = log(sampling_effort)
+  ) %>%
+  as.data.frame()
+
+# Fit a GLMM to estimate the impact of our variables
+## Assumptions violated:
+# n <- nrow(df_sPlotBiome)
+# df_sPlotBiome$Invasive_cov <- (df_sPlotBiome$Invasive_cover * (n - 1) + 0.5) / n
+# 
+# mod <- glmmTMB::glmmTMB(
+#   Invasive_cov ~ clim_integral + log(speciesRichnessBa) +
+#     (1 | Biome),
+#   family = beta_family(),
+#   data = df_sPlotBiome
+#   )
+# 
+# summary(mod)
+# performance::r2_nakagawa(mod)
+# 
+# sim <- DHARMa::simulateResiduals(mod)
+# plot(sim)
+
+# GAM per biome
+bt <- table(df_sPlotBiome$Biome)
+
+par(mfrow = c(1, 3))
+for (b in names(bt[bt > 10])) {
+  sdf <- df_sPlotBiome[which(df_sPlotBiome$Biome == b), ]
+  mod <- mgcv::gam(
+    Invasive_cover ~ s(log_speciesRichnessBa, k = 3) +
+      s(bottleneck_clim_integral, k = 3) +
+      s(log_sampling_effort, k = 3),
+    family = quasibinomial(link = "logit"),
+    data = sdf
   )
-
-
-mod <- glm(
-  Invasive_cover ~ log(speciesRichnessBa) + bottleneck_clim_integral +
-    log(sampling_effort) + Biome,
-  data = df_sPlotBiome
-  )
-
-summary(mod)
-
+  sm <- summary(mod)
+  cat(b, sm$dev.expl, "(GAM)\n")
+  vars <- c(
+    "log_speciesRichnessBa", "bottleneck_clim_integral", "log_sampling_effort")
+  
+  for (v in vars) {
+    x <- sdf[[v]]
+    if (all(!is.finite(x))) next
+    rng <- range(x, na.rm = TRUE)
+    if (!all(is.finite(rng))) next
+    grid <- data.frame(
+      log_speciesRichnessBa = mean(sdf$log_speciesRichnessBa, na.rm = TRUE),
+      bottleneck_clim_integral = mean(sdf$bottleneck_clim_integral, na.rm = TRUE),
+      log_sampling_effort = mean(sdf$log_sampling_effort, na.rm = TRUE)
+    )
+    
+    xseq <- seq(rng[1], rng[2], length.out = 100)
+    grid <- grid[rep(1, 100), ]
+    grid[[v]] <- xseq
+    
+    pred <- predict(mod, newdata = grid, type = "response")
+    
+    plot(xseq, pred,
+         type = "l",
+         main = paste(b, v),
+         xlab = v,
+         ylab = "Invasive_cover")
+  }
+}
+par(mfrow = c(1, 1))
 
 #>=============================================================================<
 #> Statistical analyses
@@ -1438,22 +1506,7 @@ df_mod <- df_invasion[stats::complete.cases(df_invasion),] %>%
     as.numeric(Biome) <= 14
   )
 
-mod_gam <- mgcv::gam(
-  Invaded ~ s(logBhattacharyya, k = 3) +
-    s(logRichnessRatio, k = 3) +
-    s(logAreaRatio, k = 3) +
-    s(climateStability, k = 3) +
-    s(logSamplingEffort, k = 3) +
-    Biome,
-  data = df_mod,
-  #method = "REML",
-  family = stats::binomial("logit")
-)
-
-summary(mod_gam)
-adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
-
-# Fit smaller models and compute explained deviance by predictor
+# Fit models and compute explained deviance by predictor
 make_formula <- function(predictors, biome = TRUE) {
   as.formula(
     paste(
@@ -1464,10 +1517,25 @@ make_formula <- function(predictors, biome = TRUE) {
   )
 }
 
+## Full model
 predictors <- c(
-  "logBhattacharyya", "logRichnessRatio", "logAreaRatio", "logSamplingEffort",
+  "logBhattacharyya", "logRichnessRatio", #"logAreaRatio",
+  "logSamplingEffort",
   "climateStability"
-  )
+)
+
+frml_full <- make_formula(predictors, biome = TRUE)
+
+mod_gam <- mgcv::gam(
+  frml_full,
+  data = df_mod,
+  #method = "REML",
+  family = stats::binomial("logit")
+)
+
+summary(mod_gam)
+adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
+
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
 for (i in 1:(length(predictors) + 1)) {
