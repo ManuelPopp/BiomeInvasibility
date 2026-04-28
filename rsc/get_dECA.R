@@ -63,9 +63,35 @@ patch_connectedness <- sapply(
     }
   )
 
+# Compute connectedness with alternative values for alpha
+alpha_low <- 0.5 / 1e6
+patch_connectedness_low <- sapply(
+  seq_along(areas),
+  function(i) {
+    sum(areas[-i] * exp(-dist_mat[i, -i] * alpha_low))
+  }
+)
+
+alpha_high <- 1 / 1e6
+patch_connectedness_high <- sapply(
+  seq_along(areas),
+  function(i) {
+    sum(areas[-i] * exp(-dist_mat[i, -i] * alpha_high))
+  }
+)
+
+alpha_max <- 1.3 / 1e6
+patch_connectedness_highest <- sapply(
+  seq_along(areas),
+  function(i) {
+    sum(areas[-i] * exp(-dist_mat[i, -i] * alpha_max))
+  }
+)
+
 # Assign clusters based on a distance threshold
 f <- 0.5
 max_dist <- log(f) / (-alpha)
+max_dist <- round(max_dist / 1e6, 0) * 1e6
 adj <- dist_mat <= max_dist
 diag(adj) <- FALSE
 
@@ -86,6 +112,9 @@ dECA_df <- data.frame(
   ID = biomes_sub$ID,
   dECA = dECA,
   connectedness = patch_connectedness,
+  connectedness_low_a = patch_connectedness_low,
+  connectedness_high_a = patch_connectedness_high,
+  connectedness_highest_a = patch_connectedness_highest,
   clusterECA = clECA,
   cluster = clusters
 )
