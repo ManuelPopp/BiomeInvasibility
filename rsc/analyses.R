@@ -125,6 +125,7 @@ f_hum_mod <- file.path(
 )
 
 f_climate_overlap <- file.path(dir_imeb, "climate_overlap.csv")
+f_climate_restime <- file.path(dir_imeb, "clim_res_time.csv")
 
 f_gisd <- file.path(dir_dat, "db", "gisd_2026-02-25", "converted.csv")
 f_100_worst <- file.path(
@@ -160,6 +161,83 @@ f_npp <- file.path(
 if (!dir.exists(dir_imed)) {
   dir.create(dir_imed, showWarnings = FALSE, recursive = TRUE)
 }
+
+
+#>=============================================================================<
+#> Functions
+#<=============================================================================>
+
+## Create a model formula from a vector of predictors
+make_formula <- function(predictors, k = 5, response = "Invaded", biome = TRUE) {
+  smooth_terms <- sprintf("s(%s, k = %s)", predictors, k)
+  rhs <- paste(smooth_terms, collapse = " + ")
+  if (biome) {
+    rhs <- paste(rhs, "+ Biome")
+  }
+  as.formula(paste(response, "~", rhs))
+}
+
+## Fail-save computation of Bhattacharyya distances
+save_bhattacharyya <- function(mu1, mu2, Sigma1, Sigma2) {
+  fail <- function(reason) {
+    list(value = NA_real_, reason = reason)
+  }
+  if (is.null(mu1) || is.null(mu2) || is.null(Sigma1) || is.null(Sigma2)) {
+    return(fail("null_input"))
+  }
+  
+  mu1 <- as.numeric(mu1)
+  mu2 <- as.numeric(mu2)
+  Sigma1 <- tryCatch(as.matrix(Sigma1), error = function(e) NULL)
+  Sigma2 <- tryCatch(as.matrix(Sigma2), error = function(e) NULL)
+  
+  if (is.null(Sigma1) || is.null(Sigma2)) {
+    return(fail("matrix_coercion_failed"))
+  }
+  
+  # Dimension checks
+  if (length(mu1) != length(mu2)) {
+    return(fail("mean_dim_mismatch"))
+  }
+  
+  if (
+    nrow(Sigma1) != ncol(Sigma1) ||
+    nrow(Sigma2) != ncol(Sigma2) ||
+    nrow(Sigma1) != length(mu1) ||
+    nrow(Sigma2) != length(mu2)
+  ) {
+    return(fail("cov_dim_mismatch"))
+  }
+  
+  if (
+    any(!is.finite(mu1)) ||
+    any(!is.finite(mu2)) ||
+    any(!is.finite(Sigma1)) ||
+    any(!is.finite(Sigma2))
+  ) {
+    return(fail("non_finite_values"))
+  }
+  
+  if (det(Sigma1) < 1e-12 || det(Sigma2) < 1e-12) {
+    return(fail("singular_covariance"))
+  }
+  
+  val <- tryCatch(
+    fpc::bhattacharyya.dist(mu1, mu2, Sigma1, Sigma2),
+    error = function(e) {NA_real_}
+  )
+  
+  if (is.na(val)) {
+    return(fail("numerical_failure"))
+  }
+  
+  if (!is.finite(val)) {
+    return(fail("infinite_result"))
+  }
+  
+  return(list(value = val, reason = "ok"))
+}
+
 
 #>=============================================================================<
 #> Data preparation
@@ -357,7 +435,7 @@ if (!"dECA" %in% names(biomes) | recompute) {
   }
   
   terra::merge(
-    terra::vect(f_bfullinfo),
+    terra::vect(f_bfullinfo)[, 1:8],
     dat,
     by = "ID",
     all.x = TRUE
@@ -385,6 +463,12 @@ clim_stab <- read.csv(f_climate_overlap) %>%
     min_clim_cluster_similarity = cminolap
   )
 
+clim_rest <- read.csv(f_climate_restime) %>%
+  dplyr::rename(
+    climate_restime = resTim
+  ) %>%
+  dplyr::select(ID, climate_restime)
+
 biomes <- terra::vect(f_bfullinfo) %>%
   dplyr::mutate(
     clusterID = paste(
@@ -397,7 +481,8 @@ biomes <- terra::vect(f_bfullinfo) %>%
   terra::merge(est_div, by = "ID", all.x = TRUE) %>%
   terra::merge(spl_eff, by = "ID", all.x = TRUE) %>%
   terra::merge(hum_mod, by = "ID", all.x = TRUE) %>%
-  terra::merge(clim_stab, by = "ID", all.x = TRUE)
+  terra::merge(clim_stab, by = "ID", all.x = TRUE) %>%
+  terra::merge(clim_rest, by = "ID", all.x = TRUE)
 
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
 
@@ -659,7 +744,7 @@ if (nativeness_source == "sinas") {
 }
 
 
-# just to check how many names can be matched somehow
+# just to check how many names can be matched
 # check_avail <- function(taxon) {
 #   taxon_species_lvl <- paste(
 #     strsplit(taxon, split = " ")[[1]][c(1, 2)],
@@ -912,12 +997,6 @@ ggplot2::ggsave(
   width = 5, height = 5
 )
 
-mod <- lm(
-  speciesRichnessBa ~ gist_100_worst * Biome,
-  data = ggdf
-)
-
-anova(mod)
 
 # coin::wilcox_test(
 #   speciesRichnessBa ~ gist_100_worst | Biome,
@@ -1252,7 +1331,8 @@ df_sPlotBiome <- sPlotVect %>%
   dplyr::mutate(
     log_speciesRichnessBa = log(speciesRichnessBa),
     log_sampling_effort = log(sampling_effort),
-    log_Connectedness = log(connectedness)
+    log_Connectedness = log(connectedness),
+    log_focalECA = log(focalECA)
   ) %>%
   as.data.frame()
 
@@ -1284,7 +1364,7 @@ for (b in names(bt[bt > 10])) {
     Invasive_cover ~
       s(log_speciesRichnessBa, k = 3) +
       s(bottleneck_clim_integral, k = 3) +
-      s(log_Connectedness, k = 3) +
+      s(log_focalECA, k = 3) +
       s(log_sampling_effort, k = 3),
     family = quasibinomial(link = "logit"),
     data = sdf
@@ -1294,7 +1374,7 @@ for (b in names(bt[bt > 10])) {
   
   vars <- c(
     "log_speciesRichnessBa", "bottleneck_clim_integral", "log_sampling_effort",
-    "log_Connectedness"
+    "log_focalECA"
     )
   
   for (v in vars) {
@@ -1306,7 +1386,7 @@ for (b in names(bt[bt > 10])) {
       log_speciesRichnessBa = mean(sdf$log_speciesRichnessBa, na.rm = TRUE),
       bottleneck_clim_integral = mean(sdf$bottleneck_clim_integral, na.rm = TRUE),
       log_sampling_effort = mean(sdf$log_sampling_effort, na.rm = TRUE),
-      log_Connectedness = mean(sdf$log_Connectedness, na.rm = TRUE)
+      log_focalECA = mean(sdf$log_focalECA, na.rm = TRUE)
     )
     
     xseq <- seq(rng[1], rng[2], length.out = 100)
@@ -1329,66 +1409,6 @@ par(mfrow = c(1, 1))
 #> Statistical analyses
 #<=============================================================================>
 
-save_bhattacharyya <- function(mu1, mu2, Sigma1, Sigma2) {
-  fail <- function(reason) {
-    list(value = NA_real_, reason = reason)
-  }
-  if (is.null(mu1) || is.null(mu2) || is.null(Sigma1) || is.null(Sigma2)) {
-    return(fail("null_input"))
-  }
-  
-  mu1 <- as.numeric(mu1)
-  mu2 <- as.numeric(mu2)
-  Sigma1 <- tryCatch(as.matrix(Sigma1), error = function(e) NULL)
-  Sigma2 <- tryCatch(as.matrix(Sigma2), error = function(e) NULL)
-  
-  if (is.null(Sigma1) || is.null(Sigma2)) {
-    return(fail("matrix_coercion_failed"))
-    }
-  
-  # Dimension checks
-  if (length(mu1) != length(mu2)) {
-    return(fail("mean_dim_mismatch"))
-    }
-  
-  if (
-    nrow(Sigma1) != ncol(Sigma1) ||
-    nrow(Sigma2) != ncol(Sigma2) ||
-    nrow(Sigma1) != length(mu1) ||
-    nrow(Sigma2) != length(mu2)
-  ) {
-    return(fail("cov_dim_mismatch"))
-    }
-  
-  if (
-    any(!is.finite(mu1)) ||
-    any(!is.finite(mu2)) ||
-    any(!is.finite(Sigma1)) ||
-    any(!is.finite(Sigma2))
-    ) {
-    return(fail("non_finite_values"))
-  }
-  
-  if (det(Sigma1) < 1e-12 || det(Sigma2) < 1e-12) {
-    return(fail("singular_covariance"))
-  }
-  
-  val <- tryCatch(
-    fpc::bhattacharyya.dist(mu1, mu2, Sigma1, Sigma2),
-    error = function(e) {NA_real_}
-  )
-  
-  if (is.na(val)) {
-    return(fail("numerical_failure"))
-  }
-  
-  if (!is.finite(val)) {
-    return(fail("infinite_result"))
-  }
-  
-  return(list(value = val, reason = "ok"))
-}
-
 env_dat <- readRDS(f_env_dat)
 env_df <- tibble::tibble(
   ID = sapply(env_dat, function(x) x$ID),
@@ -1399,12 +1419,23 @@ env_df$ID <- unlist(env_df$ID)
 
 merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
   dplyr::rename(
-    climateStability = bottleneck_clim_integral # Here, we select our metric for climate stability we want to use to proceed
+    climateStability = climate_restime # Here, we select our metric for climate stability we want to use to proceed
   )
 
-df_invasion <- do.call(
-  rbind,
-  lapply(
+# Run estimate_max_bhattacharyya.R to estimate the maximum environmental distance
+# for sampling potentially invaded plots
+max_lobBhat <- 1.34
+
+# Create sample data frame
+future::plan(multisession, workers = parallel::detectCores() - 1)
+
+## Remove later:
+stop("Load from disc, I saved this bc it takes long to compute")
+save(df_invasion, file = "C:/Users/poppman/Desktop/df_invasion.Rsave")
+load("C:/Users/poppman/Desktop/df_invasion.Rsave")
+
+df_invasion <- dplyr::bind_rows(
+  future.apply::future_lapply(
     X = unique(merged_env$Species),
     FUN = function(species) {
       donor <- merged_env %>%
@@ -1413,6 +1444,7 @@ df_invasion <- do.call(
           !is.na(speciesRichnessBa),
           Status == "Donor"
           )
+      if (nrow(donor) == 0) return(NULL)
       
       donor_stats <- donor %>%
         dplyr::summarise(
@@ -1424,9 +1456,19 @@ df_invasion <- do.call(
           maxRichness = max(speciesRichnessBa, na.rm = TRUE),
           max_climateStability = max(climateStability, na.rm = TRUE)
         )
+      
       native_environment <- donor %>%
+        dplyr::filter(lowland_area_km2 == donor_stats$max_lowland_area_km2) %>%
         dplyr::slice_head(n = 1) %>%
         dplyr::select(centre, Sigma)
+      
+      if (
+        nrow(native_environment) == 0 ||
+        is.null(native_environment$centre[[1]]) ||
+        is.null(native_environment$Sigma[[1]])
+      ) {
+        return(NULL)
+      }
       
       receiver <- merged_env %>%
         dplyr::filter(
@@ -1449,13 +1491,17 @@ df_invasion <- do.call(
           Bhattacharyya_reason = tmp$reason
         )
       
+      id_has_species <- merged_env %>%
+        dplyr::filter(Species == species) %>%
+        dplyr::pull(ID) %>%
+        unique()
+      
       background <- merged_env %>%
         dplyr::filter(
-          Species != species,
+          !ID %in% id_has_species,
           !is.na(speciesRichnessBa)
           ) %>%
         dplyr::distinct(ID, .keep_all = TRUE) %>%
-        dplyr::slice_sample(n = 100) %>%
         dplyr::rowwise() %>%
         dplyr::mutate(
           Status = "absent",
@@ -1470,6 +1516,10 @@ df_invasion <- do.call(
           ),
           Bhattacharyya = as.numeric(tmp$value),
           Bhattacharyya_reason = tmp$reason
+        ) %>%
+        dplyr::filter(
+          Bhattacharyya_reason == "ok",
+          Bhattacharyya < exp(max_lobBhat)
         )
         
       # Generate output data.frame
@@ -1501,9 +1551,11 @@ df_invasion <- do.call(
   )
 ) %>%
   dplyr::mutate(
-    areaRatio = focalECA / donor_max_focalECA,
+    areaRatio = lowland_area_km2 / donor_max_lowland_area_km2,
+    connAreaRatio = focalECA / donor_max_focalECA,
     richnessRatio = speciesRichnessBa / donor_maxRichness,
     logAreaRatio = log(areaRatio),
+    logConnAreaRatio = log(connAreaRatio),
     logRichnessRatio = log(richnessRatio),
     logBhattacharyya = log(Bhattacharyya),
     logSpeciesRichnessBa = log(speciesRichnessBa),
@@ -1530,29 +1582,75 @@ hist(df_invasion$logSamplingEffort, main = "Sampling effort (log transformed)")
 par(mfrow = c(1, 1))
 hist(df_invasion$climateStability, main = "Climate stability")
 
-df_mod <- df_invasion[stats::complete.cases(df_invasion),] %>%
+# Filter data
+df_invasion_filtered <- df_invasion[
+  stats::complete.cases(
+    df_invasion[, c("logConnAreaRatio", "logSpeciesRichnessBa", "climateStability")]
+    ),
+  ] %>%
   dplyr::mutate(
     Specieslvl = stringr::word(Species, 1, 2)
   ) %>%
   dplyr::filter(
-    as.numeric(Biome) <= 14
+    as.numeric(Biome) <= 12
+  ) %>%
+  dplyr::distinct(
+    dplyr::across(-Species), # Drop some cases where multiple subspecies were sampled and the exact subspecies identity might be unclear
+    .keep_all = TRUE
   )
 
-# Fit models and compute explained deviance by predictor
-make_formula <- function(predictors, biome = TRUE) {
-  as.formula(
-    paste(
-      "Invaded ~", 
-      paste(sprintf("s(%s, %s = 3)", predictors, "k"), collapse = " + "),
-      ifelse(biome, " + Biome", "")
-    )
+num_samples <- df_invasion_filtered %>%
+  dplyr::group_by(Species, Invaded) %>%
+  dplyr::summarise(
+    N = dplyr::n(),
+    .groups = "drop"
+  ) %>%
+  dplyr::group_by(Invaded) %>%
+  dplyr::summarise(
+    min = min(N, na.rm = TRUE),
+    mean = mean(N, na.rm = TRUE),
+    max = max(N, na.rm = TRUE),
+    median = median(N, na.rm = TRUE),
+    sum = sum(N, na.rm = TRUE)
   )
+
+mean_samples <- num_samples %>%
+  dplyr::filter(Invaded == 1) %>%
+  dplyr::pull(mean) %>%
+  as.integer()
+
+# df_mod <- df_invasion_filtered %>%
+#   dplyr::group_by(Species) %>%
+#   dplyr::group_modify(
+#     ~ {
+#       invaded <- dplyr::filter(.x, Invaded == 1)
+#       background <- dplyr::filter(.x, Invaded == 0)
+#       background <- background %>%
+#         dplyr::slice_sample(n = min(nrow(background), mean_samples))
+#       dplyr::bind_rows(invaded, background)
+#     }
+#   ) %>%
+#   dplyr::ungroup()
+
+if (length(which(df_mod$Invaded == 0)) != length(which(df_mod$Invaded == 1))) {
+  warning("Unbalanced samples. Use weights in models.")
 }
 
+
+# Fit models and compute explained deviance by predictor
 ## Full model
+w <- num_samples %>%
+  dplyr::select(Invaded, sum) %>%
+  tidyr::pivot_wider(names_from = Invaded, values_from = sum) %>%
+  dplyr::transmute(w = `0` / `1`) %>%
+  dplyr::pull(w)
+
+df_mod <- df_invasion_filtered %>%
+  dplyr::mutate(weight = ifelse(Invaded == 1, w, 1))
+
 predictors <- c(
-  "logBhattacharyya",# "logRichnessRatio",
-  "logAreaRatio",
+  "logRichnessRatio",
+  "logConnAreaRatio",
   "logSamplingEffort",
   "climateStability"
 )
@@ -1562,8 +1660,9 @@ frml_full <- make_formula(predictors, biome = TRUE)
 mod_gam <- mgcv::gam(
   frml_full,
   data = df_mod,
-  #method = "REML",
-  family = stats::binomial("logit")
+  method = "REML",
+  family = stats::binomial("logit"),
+  weights = weight
 )
 
 summary(mod_gam)
@@ -1585,7 +1684,7 @@ for (i in 1:(length(predictors) + 1)) {
     frml_r <- make_formula(predictors[-i], biome = TRUE)
   }
   
-  cat(as.character(frml_r))
+  cat("\n", as.character(frml_r))
   mod_r <- mgcv::gam(frml_r, data = df_mod, family = stats::binomial("logit"))
   adjD2_other <- ecospat::ecospat.adj.D2.glm(mod_r)
   
@@ -1738,11 +1837,6 @@ ggplot2::ggsave(
 
 
 
-
-
-
-
-
 df_donor <- merged %>%
   dplyr::mutate(
     PatchID = ID,
@@ -1790,7 +1884,7 @@ plot(log(successProb) ~ log(SpeciesRichness), data = df_donor)
 
 ## GLM that includes biome
 modInvasiveBreeder_glm <- stats::glm(
-  cbind(DonorOf, failures) ~ log(dECA) + log(SpeciesRichness) + factor(Biome),
+  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + factor(Biome),
   data = df_donor,
   family = stats::quasibinomial()
 )
