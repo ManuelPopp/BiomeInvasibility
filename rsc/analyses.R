@@ -133,7 +133,8 @@ f_100_worst <- file.path(
   )
 
 f_sPlot <- file.path(
-  dir_lud11, "poppman/data/bir/dat/lud11/sPlotOpen/sPlotOpen.RData"
+  #dir_lud11, "poppman/data/bir/dat/lud11/sPlotOpen/sPlotOpen.RData"
+  "D:/sPlot_closed", "extracted_data.RData"
 )
 
 f_gadm <- file.path(
@@ -168,7 +169,9 @@ if (!dir.exists(dir_imed)) {
 #<=============================================================================>
 
 ## Create a model formula from a vector of predictors
-make_formula <- function(predictors, k = 5, response = "Invaded", biome = TRUE) {
+make_formula <- function(
+    predictors, k = 3, response = "Invaded", biome = TRUE
+    ) {
   smooth_terms <- sprintf("s(%s, k = %s)", predictors, k)
   rhs <- paste(smooth_terms, collapse = " + ")
   if (biome) {
@@ -465,9 +468,11 @@ clim_stab <- read.csv(f_climate_overlap) %>%
 
 clim_rest <- read.csv(f_climate_restime) %>%
   dplyr::rename(
-    climate_restime = resTim
+    climate_velocity_kmpa = v, # mean climate velocity (km/yr)
+    circle_diam_km = d, # diameter of the equivalent circle (km)
+    climate_restime_a = resTim # residence time (years) as the ratio D/vel
   ) %>%
-  dplyr::select(ID, climate_restime)
+  dplyr::select(ID, climate_velocity_kmpa, climate_restime_a)
 
 biomes <- terra::vect(f_bfullinfo) %>%
   dplyr::mutate(
@@ -482,37 +487,87 @@ biomes <- terra::vect(f_bfullinfo) %>%
   terra::merge(spl_eff, by = "ID", all.x = TRUE) %>%
   terra::merge(hum_mod, by = "ID", all.x = TRUE) %>%
   terra::merge(clim_stab, by = "ID", all.x = TRUE) %>%
-  terra::merge(clim_rest, by = "ID", all.x = TRUE)
+  terra::merge(clim_rest, by = "ID", all.x = TRUE) %>%
+  dplyr::mutate(
+    log_total_area = log(total_area),
+    log_SpeciesRichness = log(speciesRichnessBa),
+    log_Connectedness = log(connectedness),
+    log_sampling_effort = log(sampling_effort),
+    biome_name = biome_names[as.numeric(BIOME)]
+  )
+
+#>-----------------------------------------------------------------------------<
+#> Correct species richness estimates for sampling bias
 
 biomes$speciesRichnessBa[which(biomes$speciesRichnessBa > 1e5)] <- NA
 
-vals <- biomes$speciesRichnessBa
-vals_log <- log10(vals)
+df_fit <- as.data.frame(biomes) %>%
+  dplyr::filter(log_SpeciesRichness > log(100))
 
-breaks <- pretty(vals_log, n = 12)
-cols <- viridis::viridis(length(breaks) - 1)
-
-col_idx <- cut(vals_log, breaks = breaks, include.lowest = TRUE)
-plot_cols <- cols[col_idx]
-plot_cols[is.na(vals)] <- "grey50"
-
-png(
-  filename = file.path(dir_fig, "SpeciesRichness.png"),
-  width = 700, height = 500
-  )
-plot(
-  biomes, col = plot_cols, border = NA,
-  main = "Estimated richness of vascular plant species"
-  )
-
-legend(
-  "left",
-  fill = cols,
-  legend = signif(10 ^ breaks[-1], 3),
-  title = "Species richness"
+m1 <- mgcv::gam(
+  log_SpeciesRichness ~ s(log_sampling_effort, k = 3),
+  data = df_fit
 )
-dev.off()
+mgcv::gam.check(m1)
 
+effort_fit <- stats::predict(m1)
+max_sampling_effect <- stats::predict(
+  m1,
+  newdata = df_fit %>%
+    dplyr::slice_min(
+      abs(
+        log_sampling_effort - quantile(log_sampling_effort, 0.90, na.rm = TRUE)
+      ),
+      n = 1
+    )
+)
+biomes$correctedSR <- NA
+biomes$correctedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.frame(
+  modelled = df_fit$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
+  estimated = df_fit$log_SpeciesRichness
+) %>%
+  dplyr::mutate(
+    maximum = pmax(modelled, estimated, na.rm = TRUE)
+  ) %>%
+  dplyr::pull(maximum)
+
+#>-----------------------------------------------------------------------------<
+#> Plot species richness estimates
+
+for (i in 1:2) {
+  if (i == 1) {
+    vals <- biomes$speciesRichnessBa
+    fn <- "EstimatedSpeciesRichness.png"
+  } else {
+    vals <- biomes$correctedSR
+    fn <- "CorrectedSpeciesRichness.png"
+  }
+  vals_log <- log10(vals)
+  
+  breaks <- pretty(vals_log, n = 12)
+  cols <- viridis::viridis(length(breaks) - 1)
+  
+  col_idx <- cut(vals_log, breaks = breaks, include.lowest = TRUE)
+  plot_cols <- cols[col_idx]
+  plot_cols[is.na(vals)] <- "grey50"
+  
+  png(
+    filename = file.path(dir_fig, fn),
+    width = 700, height = 500
+  )
+  plot(
+    biomes, col = plot_cols, border = NA,
+    main = "Estimated richness of vascular plant species"
+  )
+  
+  legend(
+    "left",
+    fill = cols,
+    legend = signif(10 ^ breaks[-1], 3),
+    title = "Species richness"
+  )
+  dev.off()
+}
 
 #>-----------------------------------------------------------------------------<
 #> Assign species to biome patches
@@ -1245,17 +1300,19 @@ ggplot2::ggsave(
 #> Add sPlot data
 #<=============================================================================>
 
-# sPlot Open
+# sPlot Open¨
+if (FALSE) {
 e <- new.env()
 load(f_sPlot, envir = e)
 sPlot <- as.list(e)
 
-sPlotData <- sPlot$DT2.oa %>%
+sPlotData <- sPlot$vegetation %>%
+  dplyr::rename(Species = Resolved_name) %>%
   dplyr::mutate(
-    Invader = Species %in% unique(sinas_data$taxon)
+    Invader = Species %in% unique(sinas_data$taxon) # TODO: CHeck for each potential invader its actual status according to SiNAS
   ) %>%
   dplyr::left_join(
-    y = sPlot$header.oa,
+    y = sPlot$header,
     by = "PlotObservationID"
   )
 
@@ -1288,11 +1345,11 @@ sPlotVect <- sPlotData %>%
   dplyr::filter(
     !is.na(Releve_area)
   ) %>%
-  terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326") %>%
   dplyr::mutate(
     BiomePatchID = terra::extract(biomes, .) %>%
       dplyr::pull(ID)
-  )
+  ) %>%
+  terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326")
 
 df_sPlotBiome <- sPlotVect %>%
   dplyr::filter(!is.na(BiomePatchID), Naturalness == "Natural") %>%
@@ -1404,7 +1461,7 @@ for (b in names(bt[bt > 10])) {
 }
 par(mfrow = c(1, 1))
 
-
+} # End of sPlot exclusion
 #>=============================================================================<
 #> Statistical analyses
 #<=============================================================================>
@@ -1419,7 +1476,8 @@ env_df$ID <- unlist(env_df$ID)
 
 merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
   dplyr::rename(
-    climateStability = climate_restime # Here, we select our metric for climate stability we want to use to proceed
+    climateStability = climate_restime_a,
+    climateVelocity = climate_velocity_kmpa
   )
 
 # Run estimate_max_bhattacharyya.R to estimate the maximum environmental distance
@@ -1429,139 +1487,151 @@ max_lobBhat <- 1.34
 # Create sample data frame
 future::plan(multisession, workers = parallel::detectCores() - 1)
 
-## Remove later:
-stop("Load from disc, I saved this bc it takes long to compute")
-save(df_invasion, file = "C:/Users/poppman/Desktop/df_invasion.Rsave")
-load("C:/Users/poppman/Desktop/df_invasion.Rsave")
-
-df_invasion <- dplyr::bind_rows(
-  future.apply::future_lapply(
-    X = unique(merged_env$Species),
-    FUN = function(species) {
-      donor <- merged_env %>%
-        dplyr::filter(
-          Species == species,
-          !is.na(speciesRichnessBa),
-          Status == "Donor"
-          )
-      if (nrow(donor) == 0) return(NULL)
-      
-      donor_stats <- donor %>%
-        dplyr::summarise(
-          modalBiome = collapse::fmode(Biome),
-          max_total_area_km2 = max(total_area_km2, na.rm = TRUE),
-          max_lowland_area_km2 = max(lowland_area_km2, na.rm = TRUE),
-          max_focalECA = max(focalECA, na.rm = TRUE),
-          max_connectedness = max(connectedness, na.rm = TRUE),
-          maxRichness = max(speciesRichnessBa, na.rm = TRUE),
-          max_climateStability = max(climateStability, na.rm = TRUE)
-        )
-      
-      native_environment <- donor %>%
-        dplyr::filter(lowland_area_km2 == donor_stats$max_lowland_area_km2) %>%
-        dplyr::slice_head(n = 1) %>%
-        dplyr::select(centre, Sigma)
-      
-      if (
-        nrow(native_environment) == 0 ||
-        is.null(native_environment$centre[[1]]) ||
-        is.null(native_environment$Sigma[[1]])
-      ) {
-        return(NULL)
-      }
-      
-      receiver <- merged_env %>%
-        dplyr::filter(
-          Species == species,
-          !is.na(speciesRichnessBa),
-          Status == "Receiver"
-          ) %>%
-        dplyr::rowwise() %>%
-        dplyr::mutate(
-          Invaded = 1,
-          tmp = list(
-              save_bhattacharyya(
-              mu1 = patchMu,
-              mu2 = native_environment$centre[[1]],
-              Sigma1 = patchSigma,
-              Sigma2 = native_environment$Sigma[[1]]
-              )
-          ),
-          Bhattacharyya = as.numeric(tmp$value),
-          Bhattacharyya_reason = tmp$reason
-        )
-      
-      id_has_species <- merged_env %>%
-        dplyr::filter(Species == species) %>%
-        dplyr::pull(ID) %>%
-        unique()
-      
-      background <- merged_env %>%
-        dplyr::filter(
-          !ID %in% id_has_species,
-          !is.na(speciesRichnessBa)
-          ) %>%
-        dplyr::distinct(ID, .keep_all = TRUE) %>%
-        dplyr::rowwise() %>%
-        dplyr::mutate(
-          Status = "absent",
-          Invaded = 0,
-          tmp = list(
-            save_bhattacharyya(
-              mu1 = patchMu,
-              mu2 = native_environment$centre[[1]],
-              Sigma1 = patchSigma,
-              Sigma2 = native_environment$Sigma[[1]]
+load_tab <- TRUE
+if (load_tab) {
+  load("C:/Users/poppman/Desktop/df_invasion.Rsave")
+} else {
+  df_invasion <- dplyr::bind_rows(
+    future.apply::future_lapply(
+      X = unique(merged_env$Species),
+      FUN = function(species) {
+        donor <- merged_env %>%
+          dplyr::filter(
+            Species == species,
+            !is.na(speciesRichnessBa),
+            Status == "Donor"
             )
-          ),
-          Bhattacharyya = as.numeric(tmp$value),
-          Bhattacharyya_reason = tmp$reason
-        ) %>%
-        dplyr::filter(
-          Bhattacharyya_reason == "ok",
-          Bhattacharyya < exp(max_lobBhat)
-        )
+        if (nrow(donor) == 0) return(NULL)
         
-      # Generate output data.frame
-      out <- dplyr::bind_rows(
-        receiver,
-        background
-      ) %>%
-        dplyr::select(
-          ID, clusterID,
-          Species, Biome, Count,
-          Status, Invaded,
-          total_area_km2, lowland_area_km2, focalECA,
-          speciesRichnessBa, sampling_effort,
-          Bhattacharyya, Bhattacharyya_reason,
-          climateStability
+        donor_stats <- donor %>%
+          dplyr::summarise(
+            modalBiome = collapse::fmode(Biome),
+            max_total_area_km2 = max(total_area_km2, na.rm = TRUE),
+            max_lowland_area_km2 = max(lowland_area_km2, na.rm = TRUE),
+            max_focalECA = max(focalECA, na.rm = TRUE),
+            max_connectedness = max(connectedness, na.rm = TRUE),
+            maxRichness = max(speciesRichnessBa, na.rm = TRUE),
+            maxCorrectedRichness = max(correctedSR, na.rm = TRUE),
+            max_climateStability = max(climateStability, na.rm = TRUE),
+            min_climateVelocity = min(climateVelocity, na.rm = TRUE)
+          )
+        
+        native_environment <- donor %>%
+          dplyr::filter(lowland_area_km2 == donor_stats$max_lowland_area_km2) %>%
+          dplyr::slice_head(n = 1) %>%
+          dplyr::select(centre, Sigma)
+        
+        if (
+          nrow(native_environment) == 0 ||
+          is.null(native_environment$centre[[1]]) ||
+          is.null(native_environment$Sigma[[1]])
+        ) {
+          return(NULL)
+        }
+        
+        receiver <- merged_env %>%
+          dplyr::filter(
+            Species == species,
+            !is.na(speciesRichnessBa),
+            Status == "Receiver"
+            ) %>%
+          dplyr::rowwise() %>%
+          dplyr::mutate(
+            Invaded = 1,
+            tmp = list(
+                save_bhattacharyya(
+                mu1 = patchMu,
+                mu2 = native_environment$centre[[1]],
+                Sigma1 = patchSigma,
+                Sigma2 = native_environment$Sigma[[1]]
+                )
+            ),
+            Bhattacharyya = as.numeric(tmp$value),
+            Bhattacharyya_reason = tmp$reason
+          )
+        
+        id_has_species <- merged_env %>%
+          dplyr::filter(Species == species) %>%
+          dplyr::pull(ID) %>%
+          unique()
+        
+        background <- merged_env %>%
+          dplyr::filter(
+            !ID %in% id_has_species,
+            !is.na(speciesRichnessBa)
+            ) %>%
+          dplyr::distinct(ID, .keep_all = TRUE) %>%
+          dplyr::rowwise() %>%
+          dplyr::mutate(
+            Status = "absent",
+            Invaded = 0,
+            tmp = list(
+              save_bhattacharyya(
+                mu1 = patchMu,
+                mu2 = native_environment$centre[[1]],
+                Sigma1 = patchSigma,
+                Sigma2 = native_environment$Sigma[[1]]
+              )
+            ),
+            Bhattacharyya = as.numeric(tmp$value),
+            Bhattacharyya_reason = tmp$reason
           ) %>%
-        dplyr::mutate(
-          donor_modalBiome = donor_stats$modalBiome,
-          donor_max_total_area_km2 = donor_stats$max_total_area_km2,
-          donor_max_lowland_area_km2 = donor_stats$max_lowland_area_km2,
-          donor_max_focalECA = donor_stats$max_focalECA,
-          donor_max_connectedness = donor_stats$max_connectedness,
-          donor_maxRichness = donor_stats$maxRichness,
-          donor_maxClimateStability = max(climateStability, na.rm = TRUE)
-        )
-      
-      return(out)
-    }
-  )
-) %>%
-  dplyr::mutate(
-    areaRatio = lowland_area_km2 / donor_max_lowland_area_km2,
-    connAreaRatio = focalECA / donor_max_focalECA,
-    richnessRatio = speciesRichnessBa / donor_maxRichness,
-    logAreaRatio = log(areaRatio),
-    logConnAreaRatio = log(connAreaRatio),
-    logRichnessRatio = log(richnessRatio),
-    logBhattacharyya = log(Bhattacharyya),
-    logSpeciesRichnessBa = log(speciesRichnessBa),
-    logSamplingEffort = log(sampling_effort)
+          dplyr::filter(
+            Bhattacharyya_reason == "ok",
+            Bhattacharyya < exp(max_lobBhat)
+          )
+          
+        # Generate output data.frame
+        out <- dplyr::bind_rows(
+          receiver,
+          background
+        ) %>%
+          dplyr::select(
+            ID, clusterID,
+            Species, Biome, Count,
+            Status, Invaded,
+            total_area_km2, lowland_area_km2, focalECA,
+            speciesRichnessBa, sampling_effort, correctedSR,
+            Bhattacharyya, Bhattacharyya_reason,
+            climateStability, climateVelocity
+            ) %>%
+          dplyr::mutate(
+            donor_modalBiome = donor_stats$modalBiome,
+            donor_max_total_area_km2 = donor_stats$max_total_area_km2,
+            donor_max_lowland_area_km2 = donor_stats$max_lowland_area_km2,
+            donor_max_focalECA = donor_stats$max_focalECA,
+            donor_max_connectedness = donor_stats$max_connectedness,
+            donor_maxRichness = donor_stats$maxRichness,
+            donor_maxCorrectedRichness = donor_stats$maxCorrectedRichness,
+            donor_maxClimateStability = donor_stats$max_climateStability,
+            donor_minclimateVelocity = donor_stats$min_climateVelocity
+          )
+        
+        return(out)
+      }
+    )
   ) %>%
-  as.data.frame()
+    dplyr::mutate(
+      areaRatio = lowland_area_km2 / donor_max_lowland_area_km2,
+      connAreaRatio = focalECA / donor_max_focalECA,
+      richnessRatio = speciesRichnessBa / donor_maxRichness,
+      correctedRichnessRatio = correctedSR / donor_maxCorrectedRichness,
+      relClimStability = climateStability / donor_maxClimateStability,
+      relClimVelocity = climateVelocity / donor_minclimateVelocity,
+      logAreaRatio = log(areaRatio),
+      logConnAreaRatio = log(connAreaRatio),
+      logRichnessRatio = log(richnessRatio),
+      logCorrectedRichnessRatio = log(correctedRichnessRatio),
+      logBhattacharyya = log(Bhattacharyya),
+      logSpeciesRichnessBa = log(speciesRichnessBa),
+      logRelClimStability = log(relClimStability),
+      logRelClimVelocity = log(relClimVelocity),
+      logSamplingEffort = log(sampling_effort)
+    ) %>%
+    as.data.frame()
+  
+  save(df_invasion, file = "C:/Users/poppman/Desktop/df_invasion.Rsave")
+}
 
 ## Debugging/analytics
 reason_summary <- table(df_invasion$Bhattacharyya_reason)
@@ -1578,26 +1648,44 @@ par(mfrow = c(2, 2))
 hist(df_invasion$logBhattacharyya, main = "Bhattacharyya (log transformed)")
 hist(df_invasion$logAreaRatio, main = "Area ratio (log transformed)")
 hist(df_invasion$logRichnessRatio, main = "Spechies richness ratio (log transformed)")
+hist(df_invasion$logCorrectedRichnessRatio, main = "Spechies richness ratio (corrected, log transformed)")
 hist(df_invasion$logSamplingEffort, main = "Sampling effort (log transformed)")
+hist(df_invasion$logRelClimStability, main = "Relative climate stability (log transformed)")
+hist(df_invasion$logRelClimVelocity, main = "Relative climate velocity (log transformed)")
 par(mfrow = c(1, 1))
-hist(df_invasion$climateStability, main = "Climate stability")
 
 # Filter data
-df_invasion_filtered <- df_invasion[
+potential_predictors <- c(
+  "logConnAreaRatio", "logSpeciesRichnessBa", "logCorrectedRichnessRatio",
+  "climateStability"
+)
+df_invasion_filtered <- df_invasion[ # Filter out incomplete cases
   stats::complete.cases(
-    df_invasion[, c("logConnAreaRatio", "logSpeciesRichnessBa", "climateStability")]
+    df_invasion[, potential_predictors]
     ),
   ] %>%
+  dplyr::filter( # Filter out non-finite values
+    dplyr::if_all(
+      dplyr::all_of(potential_predictors),
+      ~ is.finite(.)
+    )
+  ) %>%
   dplyr::mutate(
     Specieslvl = stringr::word(Species, 1, 2)
   ) %>%
   dplyr::filter(
     as.numeric(Biome) <= 12
   ) %>%
-  dplyr::distinct(
-    dplyr::across(-Species), # Drop some cases where multiple subspecies were sampled and the exact subspecies identity might be unclear
+  dplyr::distinct( # Drop unclear subspecies
+    dplyr::across(-Species),
     .keep_all = TRUE
-  )
+  ) %>%
+  dplyr::group_by(Species, Invaded) %>% # Limit to 1000 pseudo-absences per species
+  dplyr::slice_min(order_by = Bhattacharyya, n = 1000) %>%
+  dplyr::group_by(Species) %>% # Demand a min of 5 pseudo-absences per species
+  dplyr::filter(sum(Invaded == 0, na.rm = TRUE) >= 5) %>%
+  dplyr::ungroup()
+  
 
 num_samples <- df_invasion_filtered %>%
   dplyr::group_by(Species, Invaded) %>%
@@ -1632,9 +1720,9 @@ mean_samples <- num_samples %>%
 #   ) %>%
 #   dplyr::ungroup()
 
-if (length(which(df_mod$Invaded == 0)) != length(which(df_mod$Invaded == 1))) {
-  warning("Unbalanced samples. Use weights in models.")
-}
+# if (length(which(df_mod$Invaded == 0)) != length(which(df_mod$Invaded == 1))) {
+#   warning("Unbalanced samples. Use weights in models.")
+# }
 
 
 # Fit models and compute explained deviance by predictor
@@ -1651,12 +1739,11 @@ df_mod <- df_invasion_filtered %>%
 predictors <- c(
   "logRichnessRatio",
   "logConnAreaRatio",
-  "logSamplingEffort",
-  "climateStability"
+  "logRelClimVelocity",
+  "logSamplingEffort"
 )
 
 frml_full <- make_formula(predictors, biome = TRUE)
-
 mod_gam <- mgcv::gam(
   frml_full,
   data = df_mod,
@@ -1671,24 +1758,50 @@ adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
 mgcv::gam.check(mod_gam)
 mgcv::concurvity(mod_gam)
 
+# mod_interact <- mgcv::gam(
+#   Invaded ~ s(logRichnessRatio, k = 3) + 
+#     te(climateStability, logConnAreaRatio, k = 3) +
+#     s(logSamplingEffort, k = 3) + 
+#     Biome,
+#   data = df_mod,
+#   method = "REML",
+#   family = stats::binomial("logit"),
+#   weights = weight
+# )
+# summary(mod_interact)
+# ecospat::ecospat.adj.D2.glm(mod_interact)
+
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
 for (i in 1:(length(predictors) + 1)) {
   if (i > length(predictors)) {
-    p <- "Biome"
-    frml_p <- as.formula("Invaded ~ Biome")
-    frml_r <- make_formula(predictors, biome = FALSE)
-  } else {
-    p <- predictors[i]
-    frml_p <- make_formula(p, biome = FALSE)
-    frml_r <- make_formula(predictors[-i], biome = TRUE)
-  }
+      p <- "Biome"
+      frml_p <- as.formula("Invaded ~ Biome")
+    } else {
+      p <- predictors[i]
+      frml_p <- make_formula(p, biome = FALSE)
+    }
   
-  cat("\n", as.character(frml_r))
-  mod_r <- mgcv::gam(frml_r, data = df_mod, family = stats::binomial("logit"))
+  df_rand <- df_mod %>%
+    dplyr::mutate(
+      "{p}" := sample(.data[[p]])
+    )
+  
+  mod_r <- mgcv::gam(
+    frml_full,
+    data = df_rand,
+    method = "REML",
+    family = stats::binomial("logit"),
+    weights = weight
+    )
   adjD2_other <- ecospat::ecospat.adj.D2.glm(mod_r)
   
-  mod_p <- mgcv::gam(frml_p, data = df_mod, family = stats::binomial("logit"))
+  mod_p <- mgcv::gam(
+    frml_p,
+    data = df_rand,
+    family = stats::binomial("logit"),
+    weights = weight
+    )
   adjD2_single <- ecospat::ecospat.adj.D2.glm(mod_p)
   
   df_pred_d2 <- rbind(
