@@ -11,6 +11,7 @@
 print(Sys.time())
 library("rsdd")
 library("ggplot2")
+library("patchwork")
 library("viridis")
 library("dplyr")
 library("tidyr")
@@ -241,6 +242,44 @@ save_bhattacharyya <- function(mu1, mu2, Sigma1, Sigma2) {
   return(list(value = val, reason = "ok"))
 }
 
+# Check whether a species is considered native at a given location
+sinas_status <- function(taxon, lon, lat, sinas_places, sinas_data) {
+  if (!(taxon %in% sinas_data$taxon)) {
+    return(rep(NA_character_, length(lon)))
+  }
+  
+  ds <- sinas_data[which(sinas_data$taxon == taxon), ]
+  native_loc_ids <- ds[ds$establishmentMeans == "native", ]$locationID
+  introduced_loc_ids <- ds[ds$establishmentMeans == "introduced", ]$locationID
+  
+  if (
+    length(native_loc_ids) == 0 &&
+    length(introduced_loc_ids) == 0
+  ) {
+    return(rep("unknown", length(lon)))
+  }
+  
+  native <- sinas_places[which(sinas_places$locationID %in% native_loc_ids), ]
+  introduced <- sinas_places[which(sinas_places$locationID %in% introduced_loc_ids), ]
+  loc <- terra::vect(
+    data.frame(lon = lon, lat = lat),
+    geom = c("lon", "lat"),
+    crs = "epsg:4326"
+    )
+  is_native <- terra::is.related(loc, native, relation = "within")
+  is_introduced <- terra::is.related(loc, introduced, relation = "within")
+  out <- ifelse(
+    is_native & !is_introduced,
+    "native",
+    ifelse(
+      is_introduced & !is_native,
+      "introduced",
+      "unknown"
+    )
+  )
+  return(out)
+}
+
 
 #>=============================================================================<
 #> Data preparation
@@ -252,10 +291,7 @@ taxa <- rsdd::taxa()
 tax_avail <- taxa$species
 
 ## SINaS
-sinas_places <- terra::vect(
-  f_sinas_places
-)
-
+sinas_places <- terra::vect(f_sinas_places)
 sinas_data <- read.table(f_sinas_data, sep = " ", header = TRUE)
 
 ## GloNaF
@@ -521,8 +557,8 @@ max_sampling_effect <- stats::predict(
       n = 1
     )
 )
-biomes$correctedSR <- NA
-biomes$correctedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.frame(
+biomes$logCorrectedSR <- NA
+biomes$logCorrectedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.frame(
   modelled = df_fit$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
   estimated = df_fit$log_SpeciesRichness
 ) %>%
@@ -539,7 +575,7 @@ for (i in 1:2) {
     vals <- biomes$speciesRichnessBa
     fn <- "EstimatedSpeciesRichness.png"
   } else {
-    vals <- biomes$correctedSR
+    vals <- biomes$logCorrectedSR
     fn <- "CorrectedSpeciesRichness.png"
   }
   vals_log <- log10(vals)
@@ -1300,21 +1336,89 @@ ggplot2::ggsave(
 #> Add sPlot data
 #<=============================================================================>
 
-# sPlot Open¨
-if (FALSE) {
-e <- new.env()
-load(f_sPlot, envir = e)
-sPlot <- as.list(e)
-
-sPlotData <- sPlot$vegetation %>%
-  dplyr::rename(Species = Resolved_name) %>%
-  dplyr::mutate(
-    Invader = Species %in% unique(sinas_data$taxon) # TODO: CHeck for each potential invader its actual status according to SiNAS
-  ) %>%
-  dplyr::left_join(
-    y = sPlot$header,
-    by = "PlotObservationID"
+# sPlot
+f_splotdata <- file.path(dir_imed, "splot.Rdata")
+if (!file.exists(f_splotdata)) {
+  load(f_splotdata)
+} else {
+  e <- new.env()
+  load(f_sPlot, envir = e)
+  sPlot <- as.list(e)
+  rm(e)
+  gc()
+  
+  sPlot$header <- sPlot$header %>%
+    dplyr::select(
+      PlotObservationID,
+      Longitude, Latitude,
+      Releve_area, Cover_scale, Naturalness, Grassland, Shrubland,
+      Forest, Wetland,
+      Cover_total, Cover_forbs, Cover_bare_soil, Cover_bare_rock, Cover_open_water,
+      Altitude
+    )
+  
+  sPlotData <- sPlot$vegetation %>%
+    dplyr::rename(Species = Resolved_name) %>%
+    dplyr::select(
+      PlotObservationID, Species, Taxon_group, Layer, Abundance_scale, Abundance,
+      Rel_Abund_Layer, Rel_Abund_Plot
+    ) %>%
+    dplyr::filter(
+      Taxon_group %in% c("Angiosperm", "Gymnosperm", "Vascular plant")
+    ) %>%
+    dplyr::left_join(
+      y = sPlot$header,
+      by = "PlotObservationID"
+    ) %>%
+    dplyr::filter(
+      Releve_area >= 1,
+      Releve_area <= 10000
+    ) %>%
+    dplyr::mutate(
+      Taxon_group = factor(Taxon_group),
+      Cover_scale = factor(Cover_scale),
+      Invader = Species %in% unique(sinas_data$taxon)
+    )
+  
+  rm(sPlot)
+  gc()
+  
+  # Sinas taxa: 41187
+  # sPlot taxa: 100222
+  # Shared taxa: 12763 before filtering, 11613 after filtering
+  sPlotData$Status <- NA_character_
+  invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
+  species_idx <- split(
+    seq_len(nrow(sPlotData)),
+    sPlotData$Species
   )
+  progressr::with_progress({
+    p <- progressr::progressor(along = invader_species)
+    status_list <- future.apply::future_lapply(
+      X = invader_species,
+      FUN = function(spec) {
+        idx <- species_idx[[spec]]
+        res <- sinas_status(
+          taxon = spec,
+          lon = sPlotData$Longitude[idx],
+          lat = sPlotData$Latitude[idx],
+          sinas_places = sinas_places,
+          sinas_data = sinas_data
+          )
+        p()
+        list(idx = idx, res = res)
+      }
+    )
+  })
+  
+  for (i in seq_along(status_list)) {
+    sPlotData$Status[
+      status_list[[i]]$idx
+    ] <- status_list[[i]]$res
+  }
+  save(sPlotData, file = f_splot)
+}
+stop("Finished sPlot data processing.")
 
 sPlotVect <- sPlotData %>%
   dplyr::group_by(
@@ -1461,7 +1565,7 @@ for (b in names(bt[bt > 10])) {
 }
 par(mfrow = c(1, 1))
 
-} # End of sPlot exclusion
+
 #>=============================================================================<
 #> Statistical analyses
 #<=============================================================================>
@@ -1487,9 +1591,9 @@ max_lobBhat <- 1.34
 # Create sample data frame
 future::plan(multisession, workers = parallel::detectCores() - 1)
 
-load_tab <- TRUE
-if (load_tab) {
-  load("C:/Users/poppman/Desktop/df_invasion.Rsave")
+f_invasion <- file.path(dir_imeb, "df_invasion.Rsave")
+if (file.exists(f_invasion)) {
+  load(f_invasion)
 } else {
   df_invasion <- dplyr::bind_rows(
     future.apply::future_lapply(
@@ -1511,7 +1615,7 @@ if (load_tab) {
             max_focalECA = max(focalECA, na.rm = TRUE),
             max_connectedness = max(connectedness, na.rm = TRUE),
             maxRichness = max(speciesRichnessBa, na.rm = TRUE),
-            maxCorrectedRichness = max(correctedSR, na.rm = TRUE),
+            maxCorrectedRichness = max(logCorrectedSR, na.rm = TRUE),
             max_climateStability = max(climateStability, na.rm = TRUE),
             min_climateVelocity = min(climateVelocity, na.rm = TRUE)
           )
@@ -1591,7 +1695,7 @@ if (load_tab) {
             Species, Biome, Count,
             Status, Invaded,
             total_area_km2, lowland_area_km2, focalECA,
-            speciesRichnessBa, sampling_effort, correctedSR,
+            speciesRichnessBa, sampling_effort, logCorrectedSR,
             Bhattacharyya, Bhattacharyya_reason,
             climateStability, climateVelocity
             ) %>%
@@ -1615,7 +1719,7 @@ if (load_tab) {
       areaRatio = lowland_area_km2 / donor_max_lowland_area_km2,
       connAreaRatio = focalECA / donor_max_focalECA,
       richnessRatio = speciesRichnessBa / donor_maxRichness,
-      correctedRichnessRatio = correctedSR / donor_maxCorrectedRichness,
+      correctedRichnessRatio = logCorrectedSR / donor_maxCorrectedRichness,
       relClimStability = climateStability / donor_maxClimateStability,
       relClimVelocity = climateVelocity / donor_minclimateVelocity,
       logAreaRatio = log(areaRatio),
@@ -1630,7 +1734,7 @@ if (load_tab) {
     ) %>%
     as.data.frame()
   
-  save(df_invasion, file = "C:/Users/poppman/Desktop/df_invasion.Rsave")
+  save(df_invasion, file = f_invasion)
 }
 
 ## Debugging/analytics
@@ -1659,6 +1763,7 @@ potential_predictors <- c(
   "logConnAreaRatio", "logSpeciesRichnessBa", "logCorrectedRichnessRatio",
   "climateStability"
 )
+
 df_invasion_filtered <- df_invasion[ # Filter out incomplete cases
   stats::complete.cases(
     df_invasion[, potential_predictors]
@@ -1734,12 +1839,17 @@ w <- num_samples %>%
   dplyr::pull(w)
 
 df_mod <- df_invasion_filtered %>%
-  dplyr::mutate(weight = ifelse(Invaded == 1, w, 1))
+  dplyr::mutate(
+    climateVelocityRank = qnorm(
+      rank(climateVelocity) / (length(climateVelocity) + 1)
+      ),
+    weight = ifelse(Invaded == 1, w, 1),
+    )
 
 predictors <- c(
-  "logRichnessRatio",
+  "logCorrectedRichnessRatio",
   "logConnAreaRatio",
-  "logRelClimVelocity",
+  "climateVelocityRank",
   "logSamplingEffort"
 )
 
@@ -1757,19 +1867,6 @@ adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
 
 mgcv::gam.check(mod_gam)
 mgcv::concurvity(mod_gam)
-
-# mod_interact <- mgcv::gam(
-#   Invaded ~ s(logRichnessRatio, k = 3) + 
-#     te(climateStability, logConnAreaRatio, k = 3) +
-#     s(logSamplingEffort, k = 3) + 
-#     Biome,
-#   data = df_mod,
-#   method = "REML",
-#   family = stats::binomial("logit"),
-#   weights = weight
-# )
-# summary(mod_interact)
-# ecospat::ecospat.adj.D2.glm(mod_interact)
 
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
@@ -1865,110 +1962,269 @@ ggplot2::ggsave(
   width = 5, height = 5
   )
 
-mods_gam <- list()
-d2s_gam <- c()
-N <- 50
-pb <- progress::progress_bar$new(total = N)
-for (i in 1:N) {
-  set.seed(i)
-  df_ss <- df_mod %>%
-    dplyr::group_by(Specieslvl, Status) %>%
-    dplyr::sample_n(size = 1)
-  
-  mods_gam[[i]] <- mgcv::gam(
-    frml_full,
-    data = df_ss,
-    family = stats::binomial("logit")
-  )
-  d2s_gam <- c(
-    d2s_gam,
-    ecospat::ecospat.adj.D2.glm(mods_gam[[i]])
-  )
-  pb$tick()
+
+# Fit model per biome, estimate explained deviance contributions
+# and plot response shapes
+frml_bi <- make_formula(predictors, biome = FALSE)
+dir_plots <- file.path(dir_fig, "invasion_prob_by_biome")
+if(!dir.exists(dir_plots)) {
+  dir.create(dir_plots, showWarnings = FALSE)
 }
-rm(pb)
-
-hist(d2s_gam)
-
-
-# Fit models to subsets of the data and plot response shapes
-means <- colMeans(df_mod[, predictors], na.rm = TRUE)
-
-plot_dfs <- lapply(predictors, function(v) {
-  x_seq <- seq(
-    min(df_mod[[v]], na.rm = TRUE),
-    max(df_mod[[v]], na.rm = TRUE),
-    length.out = 500
-  )
+plot_list <- list()
+for (bi in sort(unique(df_mod$Biome))) {
+  w <- subset(df_mod, Biome == bi) %>%
+    dplyr::group_by(Species, Invaded) %>%
+    dplyr::summarise(
+      N = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    dplyr::group_by(Invaded) %>%
+    dplyr::summarise(
+      sum = sum(N, na.rm = TRUE)
+    ) %>%
+    tidyr::pivot_wider(names_from = Invaded, values_from = sum) %>%
+    dplyr::transmute(w = `0` / `1`) %>%
+    dplyr::pull(w)
   
-  newdata <- as.data.frame(as.list(means))[rep(1, 500), ]
-  newdata[[v]] <- x_seq
-  newdata$Biome <- df_mod$Biome[1]
-  
-  # predictions: matrix (rows = x, cols = models)
-  pred_mat <- sapply(
-    X = mods_gam,
-    FUN = function(m) {predict(m, newdata = newdata, type = "response")}
+  df_bi <- subset(df_mod, Biome == bi) %>%
+    dplyr::mutate(
+      climateVelocityRank = qnorm(
+        rank(climateVelocity) / (length(climateVelocity) + 1)
+      ),
+      weight = ifelse(Invaded == 1, w, 1),
     )
   
-  # summary stats
-  data.frame(
-    x = x_seq,
-    mean = rowMeans(pred_mat, na.rm = TRUE),
-    lo = apply(pred_mat, 1, quantile, probs = 0.1, na.rm = TRUE),
-    hi = apply(pred_mat, 1, quantile, probs = 0.9, na.rm = TRUE),
-    variable = v
+  mod_bi <- mgcv::gam(
+    frml_bi,
+    data = df_bi,
+    method = "REML",
+    family = stats::binomial("logit"),
+    weights = weight
   )
-})
-
-df_plot <- do.call(rbind, plot_dfs) %>%
-  dplyr::mutate(
-    Predictor = sapply(
-      variable,
-      function(x) trimws(sub("log", "", gsub("([A-Z])", " \\1", x)))
+  adjD2_bi <- ecospat::ecospat.adj.D2.glm(mod_bi)
+  
+  # Get delta D2 for each predictor
+  delta_adjD2_p <- c()
+  for (p in predictors) {
+    df_rand <- df_bi %>%
+      dplyr::mutate(
+        "{p}" := sample(.data[[p]])
       )
-  )
-
-gg_resp <- ggplot2::ggplot(df_plot, ggplot2::aes(x = x, y = mean)) +
-  ggplot2::geom_line(colour = rgb(0, 102/255, 102/255)) +
-  ggplot2::geom_ribbon(
-    ggplot2::aes(ymin = lo, ymax = hi),
-    alpha = 0.2, fill = rgb(0, 102/255, 102/255)
+    
+    mod_rand <- mgcv::gam(
+      frml_bi,
+      data = df_rand,
+      method = "REML",
+      family = stats::binomial("logit"),
+      weights = weight
+    )
+    adjD2_rand <- ecospat::ecospat.adj.D2.glm(mod_rand)
+    delta_adjD2_p <- c(delta_adjD2_p, adjD2_bi - adjD2_rand)
+  }
+  names(delta_adjD2_p) <- predictors
+  
+  # Plot smooth responses
+  pred_dfs <- list()
+  for (p in predictors) {
+    nd <- data.frame(
+      matrix(
+        ncol = length(predictors),
+        nrow = 200
+      )
+    )
+    
+    names(nd) <- predictors
+    
+    # Set all variables to median
+    for (v in predictors) {
+      nd[[v]] <- median(df_bi[[v]], na.rm = TRUE)
+    }
+    
+    nd[[p]] <- seq(
+      min(df_bi[[p]], na.rm = TRUE),
+      max(df_bi[[p]], na.rm = TRUE),
+      length.out = 200
+    )
+    
+    pred <- predict(
+      mod_bi,
+      newdata = nd,
+      type = "lpmatrix"#"link",
+      #se.fit = TRUE
+    )
+    b <- coef(mod_bi)
+    V <- vcov(mod_bi)
+    sim_b <- MASS::mvrnorm(n = 2000, mu = b, Sigma = V)
+    fit_sim <- sim_b %*% t(pred)
+    fit_mean <- colMeans(fit_sim)
+    fit_low <- apply(fit_sim, 2, quantile, 0.025)
+    fit_high <- apply(fit_sim, 2, quantile, 0.975)
+    
+    d <- data.frame(
+      predictor = p,
+      x = nd[[p]],
+      fit = fit_mean,
+      lower = fit_low,
+      upper = fit_high,
+      deltaD2 = delta_adjD2_p[p]
+    )
+    
+    pred_dfs[[p]] <- d
+  }
+  
+  plot_df <- dplyr::bind_rows(pred_dfs)
+  
+  # Plot response shapes
+  pred_plots <- list()
+  for (p in predictors) {
+    d <- plot_df %>%
+      dplyr::filter(predictor == p)
+    
+    delta_d2 <- unique(d$deltaD2)
+    
+    # Response curve
+    p_curve <- ggplot2::ggplot(
+      data = d,
+      ggplot2::aes(x = x, y = fit)
     ) +
-  ggplot2::labs(
-    x = "Predictor value (log scaled)",
-    y = "Predicted invasion probability",
+      ggplot2::geom_ribbon(
+        ggplot2::aes(
+          ymin = lower,
+          ymax = upper
+        ),
+        fill = "grey70",
+        alpha = 0.4
+      ) +
+      ggplot2::geom_line(
+        linewidth = 1
+      ) +
+      ggplot2::labs(
+        title = p,
+        x = NULL,
+        y = NULL
+      ) +
+      ggplot2::theme_bw() +
+      ggplot2::theme(
+        plot.title = ggplot2::element_text(
+          size = 10,
+          face = "bold"
+        ),
+        panel.grid = ggplot2::element_blank(),
+        axis.title = ggplot2::element_blank(),
+        plot.margin = grid::unit(
+          c(2, 2, 2, 2),
+          "pt"
+        )
+      )
+    
+    # Explained deviance bar
+    bar_df <- data.frame(
+      xmin = 0,
+      xmax = 1,
+      ymin = 0,
+      ymax = 1,
+      fill = pmax(delta_d2 / adjD2_bi, 0)
+    )
+    
+    p_bar <- ggplot2::ggplot() +
+      ggplot2::geom_rect(
+        ggplot2::aes(
+          xmin = 0,
+          xmax = 1,
+          ymin = 0,
+          ymax = 1
+        ),
+        fill = NA,
+        colour = "black",
+        linewidth = 0.5
+      ) +
+      ggplot2::geom_rect(
+        data = bar_df,
+        ggplot2::aes(
+          xmin = 0,
+          xmax = 1,
+          ymin = 0,
+          ymax = fill
+        ),
+        fill = "black"
+      ) +
+      ggplot2::scale_x_continuous(
+        limits = c(0, 1),
+        expand = c(0, 0)
+      ) +
+      ggplot2::scale_y_continuous(
+        limits = c(0, 1),
+        expand = c(0, 0)
+      ) +
+      ggplot2::theme_void() +
+      ggplot2::theme(
+        plot.margin = grid::unit(
+          c(2, 2, 2, 2),
+          "pt"
+        )
+      )
+    pred_plots[[p]] <- p_curve + p_bar +
+      patchwork::plot_layout(
+        widths = c(12, 1)
+      )
+  }
+  # --- Combine all predictors vertically ---
+  p_final <- patchwork::wrap_plots(
+    pred_plots,
+    ncol = 1
   ) +
-  ggplot2::theme_bw() +
-  ggplot2::facet_wrap(. ~ Predictor, scales = "free_x")
+    patchwork::plot_annotation(
+      title = paste0(bi, " | adj. D² = ", round(adjD2_bi, 3))
+    ) &
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        size = 8,
+        face = "bold"
+      )
+    )
+  
+  plot_list[[bi]] <- p_final
+  bi_idx <- which(levels(df_mod$Biome) == bi)
+  ggplot2::ggsave(
+    filename = file.path(dir_plots, paste0("Response_", bi_idx, ".svg")),
+    plot = p_final, width = 3, height = 7
+    )
+  ggplot2::ggsave(
+    filename = file.path(dir_plots, paste0("Response_", bi_idx, ".pdf")),
+    plot = p_final, width = 3, height = 7
+  )
+}
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "ResponseShapes.svg"),
-  plot = gg_resp,
-  width = 7, height = 5
-)
+plot_list[[1]]
 
 
+stop("The rest doesn't work.")
+#>=============================================================================<
+#> Invasive species breeder model
+#>=============================================================================<
 
-df_donor <- merged %>%
-  dplyr::mutate(
-    PatchID = ID,
-    Area = lowland_area,
-    OlsonArea = total_area,
-    SpeciesRichness = replace_na(round(speciesRichnessBa, 0), 0)
-    ) %>%
+df_donor <- merged_env %>%
   dplyr::filter(
-    Area > 0,
+    as.numeric(Biome) <= 12,
+    as.numeric(Biome) != 10,
+    total_area > 100,
     Status == "Donor",
-    SpeciesRichness > 50
+    logCorrectedSR > log(50)
   ) %>%
+  dplyr::mutate(
+    Biome = base::droplevels(Biome),
+    PatchID = ID,
+    correctedSR = exp(logCorrectedSR),
+    logConnArea = log(focalECA),
+    SpeciesRichness = tidyr::replace_na(round(correctedSR, 0), 0)
+    ) %>%
   dplyr::group_by(Species, Status) %>%
-  dplyr::filter(
+  dplyr::filter( # Assign the origin of each invasive species to the patch with its highest frequency
     Count == max(Count)
     ) %>%
   dplyr::group_by(
-    Biome, PatchID, Area, OlsonArea, dECA, focalECA, connectedness,
-    SpeciesRichness, Status
+    Biome, PatchID, log_total_area, focalECA, connectedness,
+    SpeciesRichness, Status, climateVelocity, climateStability
     ) %>%
   dplyr::summarise(
     N = dplyr::n(),
@@ -1976,8 +2232,8 @@ df_donor <- merged %>%
   ) %>%
   tidyr::pivot_wider(
     id_cols = c(
-      Biome, PatchID, Area, OlsonArea, dECA, focalECA, connectedness,
-      SpeciesRichness
+      Biome, PatchID, log_total_area, focalECA, connectedness,
+      SpeciesRichness, climateVelocity, climateStability
       ),
     names_from = Status,
     values_from = N
@@ -1986,6 +2242,9 @@ df_donor <- merged %>%
   dplyr::rename(
     DonorOf = Donor
   ) %>%
+  dplyr::filter(
+    DonorOf < SpeciesRichness
+    ) %>%
   dplyr::mutate(
     PropInvasive = DonorOf / SpeciesRichness,
     failures = pmax(SpeciesRichness - DonorOf, 0),
@@ -1993,7 +2252,48 @@ df_donor <- merged %>%
     successProb = successRate / (1 - successRate)
   )
 
-plot(log(successProb) ~ log(SpeciesRichness), data = df_donor)
+plot(log(successProb) ~ log(focalECA), data = df_donor)
+
+
+
+
+df_donor_inla <- df_donor %>%
+  dplyr::group_by(Biome) %>%
+  dplyr::filter(dplyr::n() >= 10) %>%
+  dplyr::ungroup() %>%
+  dplyr::mutate(
+    Biome = droplevels(Biome)
+  )
+
+library("INLA")
+
+modInvasiveBreeder_inla <- INLA::inla(
+  cbind(DonorOf, failures) ~
+    log(focalECA) +
+    f(Biome, model = "iid"),
+  
+  family = "binomial",
+  data = df_donor_inla,
+  
+  control.predictor = list(compute = TRUE),
+  control.compute = list(dic = TRUE, waic = TRUE)
+)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## GLM that includes biome
 modInvasiveBreeder_glm <- stats::glm(
@@ -2006,9 +2306,9 @@ summary(modInvasiveBreeder_glm)
 coef_tab_glm <- summary(modInvasiveBreeder_glm)$coefficients
 
 ## GLMM that controls for biome
-cor(df_donor$Area, df_donor$SpeciesRichness, use = "complete.obs")
+cor(df_donor$focalECA, df_donor$SpeciesRichness, use = "complete.obs")
 modInvasiveBreeder_glmm <- lme4::glmer(
-  cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + (1 | Biome),
+  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + (1 | Biome),
   data = df_donor,
   family = binomial
 )
@@ -2027,7 +2327,7 @@ overdisp_fun(modInvasiveBreeder_glmm)
 
 ## Betabinomial GLMM
 modInvasiveBreeder_bb <- glmmTMB::glmmTMB(
-  cbind(DonorOf, failures) ~ log(Area) + log(dECA) + log(SpeciesRichness) + (1 | Biome),
+  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + (1 | Biome),
   data = df_donor,
   family = glmmTMB::betabinomial()
 )
