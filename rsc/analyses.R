@@ -1392,6 +1392,7 @@ if (!file.exists(f_splotdata)) {
     seq_len(nrow(sPlotData)),
     sPlotData$Species
   )
+  future::plan(future::multicore)
   progressr::with_progress({
     p <- progressr::progressor(along = invader_species)
     status_list <- future.apply::future_lapply(
