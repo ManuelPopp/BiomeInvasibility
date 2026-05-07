@@ -22,7 +22,7 @@ library("lme4")
 library("mgcv")
 library("glmmTMB")
 library("boot")
-library("coin")
+#library("coin")
 library("rstatix")
 library("performance")
 library("MuMIn") # Alternative to performance
@@ -1338,7 +1338,7 @@ ggplot2::ggsave(
 
 # sPlot
 f_splotdata <- file.path(dir_imed, "splot.Rdata")
-if (!file.exists(f_splotdata)) {
+if (file.exists(f_splotdata)) {
   load(f_splotdata)
 } else {
   e <- new.env()
@@ -1387,39 +1387,76 @@ if (!file.exists(f_splotdata)) {
   # sPlot taxa: 100222
   # Shared taxa: 12763 before filtering, 11613 after filtering
   sPlotData$Status <- NA_character_
-  invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
-  species_idx <- split(
-    seq_len(nrow(sPlotData)),
-    sPlotData$Species
-  )
-  future::plan(future::multicore)
-  progressr::with_progress({
-    p <- progressr::progressor(along = invader_species)
-    status_list <- future.apply::future_lapply(
-      X = invader_species,
-      FUN = function(spec) {
-        idx <- species_idx[[spec]]
-        res <- sinas_status(
-          taxon = spec,
-          lon = sPlotData$Longitude[idx],
-          lat = sPlotData$Latitude[idx],
-          sinas_places = sinas_places,
-          sinas_data = sinas_data
-          )
-        p()
-        list(idx = idx, res = res)
-      }
+  if (Sys.info()["sysname"] == "Windows") {
+    invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
+    species_idx <- split(
+      seq_len(nrow(sPlotData)),
+      sPlotData$Species
     )
-  })
-  
-  for (i in seq_along(status_list)) {
-    sPlotData$Status[
-      status_list[[i]]$idx
-    ] <- status_list[[i]]$res
+    
+    pb <- progress::progress_bar$new(total = length(invader_species))
+    for (spec in invader_species) {
+      idx <- which(sPlotData$Species == spec)
+      sPlotData$Status[idx] <- sinas_status(
+        taxon = spec,
+        lon = sPlotData$Longitude[idx],
+        lat = sPlotData$Latitude[idx],
+        sinas_places = sinas_places,
+        sinas_data = sinas_data
+        )
+      gc()
+      pb$tick()
+      }
+  } else {
+    coords <- data.frame(
+      Species = sPlotData$Species,
+      Longitude = sPlotData$Longitude,
+      Latitude = sPlotData$Latitude
+    )
+    sinas_data_small <- sinas_data[
+      sinas_data$taxon %in% coords$Species,
+    ]
+    species_idx <- split(
+      seq_len(nrow(coords)),
+      coords$Species
+    )
+    invader_species <- unique(coords$Species[coords$Species %in% sinas_data$taxon])
+    
+    options(future.globals.maxSize = 2 * 1024^3)
+    progressr::handlers(global = TRUE)
+    progressr::handlers("progress")
+    future::plan(future::multicore)
+    progressr::with_progress({
+      p <- progressr::progressor(along = invader_species)
+      status_list <- future.apply::future_lapply(
+        X = invader_species,
+        FUN = function(spec) {
+          idx <- species_idx[[spec]]
+          res <- sinas_status(
+            taxon = spec,
+            lon = coords$Longitude[idx],
+            lat = coords$Latitude[idx],
+            sinas_places = sinas_places,
+            sinas_data = sinas_data_small
+          )
+          p()
+          list(idx = idx, res = res)
+        }
+      )
+    })
+    
+    for (i in seq_along(status_list)) {
+      sPlotData$Status[
+        status_list[[i]]$idx
+      ] <- status_list[[i]]$res
+    }
+    
+    rm(sinas_data_small)
   }
+  
   save(sPlotData, file = f_splot)
 }
-stop("Finished sPlot data processing.")
+
 
 sPlotVect <- sPlotData %>%
   dplyr::group_by(
