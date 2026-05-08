@@ -1372,7 +1372,9 @@ if (file.exists(f_splotdata)) {
     ) %>%
     dplyr::filter(
       Releve_area >= 1,
-      Releve_area <= 10000
+      Releve_area <= 10000,
+      is.finite(Longitude),
+      is.finite(Latitude)
     ) %>%
     dplyr::mutate(
       Taxon_group = factor(Taxon_group),
@@ -1387,15 +1389,15 @@ if (file.exists(f_splotdata)) {
   # sPlot taxa: 100222
   # Shared taxa: 12763 before filtering, 11613 after filtering
   sPlotData$Status <- NA_character_
+  invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
   if (Sys.info()["sysname"] == "Windows") {
-    invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
     species_idx <- split(
       seq_len(nrow(sPlotData)),
       sPlotData$Species
     )
     
     pb <- progress::progress_bar$new(total = length(invader_species))
-    for (spec in invader_species) {
+    for (spec in invader_species[1:30]) {
       idx <- which(sPlotData$Species == spec)
       sPlotData$Status[idx] <- sinas_status(
         taxon = spec,
@@ -1408,79 +1410,64 @@ if (file.exists(f_splotdata)) {
       pb$tick()
       }
   } else {
-    coords <- data.frame(
-      Species = sPlotData$Species,
-      Longitude = sPlotData$Longitude,
-      Latitude = sPlotData$Latitude
+    idx_map <- split(seq_len(nrow(sPlotData)), sPlotData$Species)
+    idx_map <- idx_map[intersect(invader_species, names(idx_map))]
+    idx_map <- idx_map[intersect(invader_species, names(idx_map))]
+    lon_list <- lapply(idx_map, function(idx) sPlotData$Longitude[idx])
+    lat_list <- lapply(idx_map, function(idx) sPlotData$Latitude[idx])
+    sinas_data_small <- sinas_data[sinas_data$taxon %in% names(idx_map), ]
+    n_workers <- 14
+    cat("\nRunning", n_workers, "parallel loops...")
+    species_split <- split(
+      names(idx_map),
+      rep_len(seq_len(n_workers), length(idx_map))
     )
-    
-    sinas_data_small <- sinas_data[
-      sinas_data$taxon %in% coords$Species,
-    ]
-    species_idx <- split(
-      seq_len(nrow(coords)),
-      coords$Species
-    )
-    invader_species <- unique(coords$Species[coords$Species %in% sinas_data$taxon])
-    cat("\nStarting parallel computation of nativeness status for sPlot data...")
-    print(Sys.time())
-    options(future.globals.maxSize = 2 * 1024^3)
-    progressr::handlers(global = TRUE)
-    progressr::handlers("progress")
-    # Chunk to prevent memory accumulation
-    chunk_size <- 500
-    species_chunks <- split(
-      invader_species,
-      ceiling(seq_along(invader_species) / chunk_size)
-    )
-    
-    status_list <- list()
-    
-    for (chunk_id in seq_along(species_chunks)) {
-      cat("\nProcessing chunk", chunk_id, "of", length(species_chunks))
-      future::plan(future::multicore, workers = parallel::detectCores() / 2)
-      chunk_result <- progressr::with_progress({
-        p <- progressr::progressor(along = invader_species)
-        status_list <- future.apply::future_lapply(
-          X = species_chunks[[chunk_id]],
-          FUN = function(spec) {
-            tryCatch({
-              idx <- species_idx[[spec]]
-              res <- sinas_status(
+    options(future.globals.maxSize = 400 * 1024^3 / n_workers) # 400 GB in total
+    results <- future.apply::future_lapply(
+      X = species_split,
+      FUN = function(spec_block, idx_map_arg, lon_list_arg, lat_list_arg) {
+        local_result <- list()
+        for (spec in spec_block) {
+          idx <- idx_map_arg[[spec]]
+          local_result[[spec]] <- list(
+            idx = idx,
+            res = tryCatch(
+              sinas_status(
                 taxon = spec,
-                lon = coords$Longitude[idx],
-                lat = coords$Latitude[idx],
+                lon = lon_list_arg[[spec]],
+                lat = lat_list_arg[[spec]],
                 sinas_places = sinas_places,
                 sinas_data = sinas_data_small
-              )
-              p()
-              list(idx = idx, res = res)
-            },
-            error = function(e) {
-              message(paste("Error for species:", spec))
-              message(e$message)
-              NULL
+              ),
+              error = function(e) {
+                cat(
+                  "\nError processing species ", spec, ": ", conditionMessage(e),
+                  file = "/home/poppman/log.txt", append = TRUE
+                )
+                rep(NA_character_, length(idx_map_arg[[spec]]))
               }
             )
+          )
+          if (length(local_result) %% 10 == 0) {
+            cat(
+              "\nFinished species ", spec, " of ", length(spec_block),
+              file = "/home/poppman/log.txt", append = TRUE
+            )
           }
-        )
-      })
-      status_list <- c(status_list, chunk_result)
-      rm(chunk_result)
-      gc()
-      future:::ClusterRegistry("stop")
-    }
-    # Write the results to sPlotData
-    for (i in seq_along(status_list)) {
-      if (!is.null(status_list[[i]])) {
-        sPlotData$Status[status_list[[i]]$idx] <- status_list[[i]]$res
-      }
-    }
+        }
+        local_result
+      },
+      idx_map_arg = idx_map,
+      lon_list_arg = lon_list,
+      lat_list_arg = lat_list
+    )
     
-    rm(sinas_data_small)
-    gc()
+    
+    flat <- unlist(results, recursive = FALSE)
+    for (x in flat) {
+      sPlotData$Status[x$idx] <- x$res
+    }
   }
-  
   save(sPlotData, file = f_splot)
 }
 
@@ -2030,6 +2017,10 @@ ggplot2::ggsave(
 
 # Fit model per biome, estimate explained deviance contributions
 # and plot response shapes
+
+#
+# Maybe worth a try: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
+#
 frml_bi <- make_formula(predictors, biome = FALSE)
 dir_plots <- file.path(dir_fig, "invasion_prob_by_biome")
 if(!dir.exists(dir_plots)) {
@@ -2330,7 +2321,7 @@ df_donor_inla <- df_donor %>%
     Biome = droplevels(Biome)
   )
 
-library("INLA")
+library("INLA") # Check out mgcv::ginla https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
 
 modInvasiveBreeder_inla <- INLA::inla(
   cbind(DonorOf, failures) ~
