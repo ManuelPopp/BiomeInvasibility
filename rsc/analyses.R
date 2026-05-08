@@ -1413,6 +1413,7 @@ if (file.exists(f_splotdata)) {
       Longitude = sPlotData$Longitude,
       Latitude = sPlotData$Latitude
     )
+    
     sinas_data_small <- sinas_data[
       sinas_data$taxon %in% coords$Species,
     ]
@@ -1421,37 +1422,63 @@ if (file.exists(f_splotdata)) {
       coords$Species
     )
     invader_species <- unique(coords$Species[coords$Species %in% sinas_data$taxon])
-    
+    cat("\nStarting parallel computation of nativeness status for sPlot data...")
+    print(Sys.time())
     options(future.globals.maxSize = 2 * 1024^3)
     progressr::handlers(global = TRUE)
     progressr::handlers("progress")
-    future::plan(future::multicore)
-    progressr::with_progress({
-      p <- progressr::progressor(along = invader_species)
-      status_list <- future.apply::future_lapply(
-        X = invader_species,
-        FUN = function(spec) {
-          idx <- species_idx[[spec]]
-          res <- sinas_status(
-            taxon = spec,
-            lon = coords$Longitude[idx],
-            lat = coords$Latitude[idx],
-            sinas_places = sinas_places,
-            sinas_data = sinas_data_small
-          )
-          p()
-          list(idx = idx, res = res)
-        }
-      )
-    })
+    # Chunk to prevent memory accumulation
+    chunk_size <- 500
+    species_chunks <- split(
+      invader_species,
+      ceiling(seq_along(invader_species) / chunk_size)
+    )
     
+    status_list <- list()
+    
+    for (chunk_id in seq_along(species_chunks)) {
+      cat("\nProcessing chunk", chunk_id, "of", length(species_chunks))
+      future::plan(future::multicore, workers = parallel::detectCores() / 2)
+      chunk_result <- progressr::with_progress({
+        p <- progressr::progressor(along = invader_species)
+        status_list <- future.apply::future_lapply(
+          X = species_chunks[[chunk_id]],
+          FUN = function(spec) {
+            tryCatch({
+              idx <- species_idx[[spec]]
+              res <- sinas_status(
+                taxon = spec,
+                lon = coords$Longitude[idx],
+                lat = coords$Latitude[idx],
+                sinas_places = sinas_places,
+                sinas_data = sinas_data_small
+              )
+              p()
+              list(idx = idx, res = res)
+            },
+            error = function(e) {
+              message(paste("Error for species:", spec))
+              message(e$message)
+              NULL
+              }
+            )
+          }
+        )
+      })
+      status_list <- c(status_list, chunk_result)
+      rm(chunk_result)
+      gc()
+      future:::ClusterRegistry("stop")
+    }
+    # Write the results to sPlotData
     for (i in seq_along(status_list)) {
-      sPlotData$Status[
-        status_list[[i]]$idx
-      ] <- status_list[[i]]$res
+      if (!is.null(status_list[[i]])) {
+        sPlotData$Status[status_list[[i]]$idx] <- status_list[[i]]$res
+      }
     }
     
     rm(sinas_data_small)
+    gc()
   }
   
   save(sPlotData, file = f_splot)
