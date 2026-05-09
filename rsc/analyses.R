@@ -1390,14 +1390,15 @@ if (file.exists(f_splotdata)) {
   # Shared taxa: 12763 before filtering, 11613 after filtering
   sPlotData$Status <- NA_character_
   invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
-  if (Sys.info()["sysname"] == "Windows") {
+  run_sequentially <- TRUE
+  if (Sys.info()["sysname"] == "Windows" | run_sequentially) {
     species_idx <- split(
       seq_len(nrow(sPlotData)),
       sPlotData$Species
     )
     
     pb <- progress::progress_bar$new(total = length(invader_species))
-    for (spec in invader_species[1:30]) {
+    for (spec in invader_species) {
       idx <- which(sPlotData$Species == spec)
       sPlotData$Status[idx] <- sinas_status(
         taxon = spec,
@@ -1406,6 +1407,7 @@ if (file.exists(f_splotdata)) {
         sinas_places = sinas_places,
         sinas_data = sinas_data
         )
+      message("\nFinished species ", spec, " of ", length(invader_species))
       gc()
       pb$tick()
       }
