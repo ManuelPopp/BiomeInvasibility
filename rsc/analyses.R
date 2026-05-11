@@ -169,6 +169,9 @@ if (!dir.exists(dir_imed)) {
 #> Functions
 #<=============================================================================>
 
+## Ensure fallback operator exists
+`%||%` <- function(x, y) if (is.null(x)) y else x
+
 ## Create a model formula from a vector of predictors
 make_formula <- function(
     predictors, k = 3, response = "Invaded", biome = TRUE
@@ -258,9 +261,6 @@ sinas_status <- function(taxon, sinas_loc_ids, sinas_data) {
   ) {
     return(rep("unknown", length(sinas_loc_ids)))
   }
-  
-  native <- sinas_places[which(sinas_places$locationID %in% native_loc_ids), ]
-  introduced <- sinas_places[which(sinas_places$locationID %in% introduced_loc_ids), ]
   
   is_native <- sinas_loc_ids %in% native_loc_ids
   is_introduced <- sinas_loc_ids %in% introduced_loc_ids
@@ -1333,7 +1333,7 @@ ggplot2::ggsave(
 #<=============================================================================>
 
 # sPlot
-f_splotdata <- file.path(dir_imed, "splot.Rdata")
+f_splotdata <- file.path(dir_imed, "splot.RData")
 if (file.exists(f_splotdata)) {
   load(f_splotdata)
 } else {
@@ -1396,144 +1396,165 @@ if (file.exists(f_splotdata)) {
     dplyr::select(PlotObservationID, Longitude, Latitude) %>%
     terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326")
   
-  loc_ids <- terra::extract(sinas_places, plot_locs)
+  # Rasterise SINaS places for faster value extraction
+  r_loc <- terra::rasterize(
+    sinas_places,
+    terra::rast(f_envstack, lyrs = 1),
+    field = "locationID",
+    touches = TRUE
+  )
+  
+  # Extract SINaS location IDs
+  loc_ids <- terra::extract(r_loc, plot_locs) %>%
+    dplyr::mutate(PlotObservationID = plot_locs$PlotObservationID)
+  
+  # Lookup table
+  plot_to_loc <- setNames(
+    loc_ids$locationID,
+    loc_ids$PlotObservationID
+  )
   
   # Sinas taxa: 41187
   # sPlot taxa: 100222
   # Shared taxa: 12763 before filtering, 11613 after filtering
   sPlotData$Status <- NA_character_
+  
+  # Create look-up tables for native/introduced location IDs
   invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
-  if (Sys.info()["sysname"] == "Windows") {
-    species_idx <- split(
-      seq_len(nrow(sPlotData)),
-      sPlotData$Species
+  sinas_small <- sinas_data %>%
+    dplyr::filter(taxon %in% invader_species) %>%
+    dplyr::select(taxon, locationID, establishmentMeans)
+  
+  native_map <- split(
+    sinas_small$locationID[sinas_small$establishmentMeans == "native"],
+    sinas_small$taxon[sinas_small$establishmentMeans == "native"]
+  )
+  
+  intro_map <- split(
+    sinas_small$locationID[sinas_small$establishmentMeans == "introduced"],
+    sinas_small$taxon[sinas_small$establishmentMeans == "introduced"]
+  )
+  
+  native_map <- setNames(
+    lapply(invader_species, function(sp) {native_map[[sp]] %||% integer(0)}),
+    invader_species
+  )
+  
+  intro_map <- setNames(
+    lapply(invader_species, function(sp) {intro_map[[sp]] %||% integer(0)}),
+    invader_species
+  )
+  
+  # Get native/introduced status of invader species observations
+  sPlotDataSmall <- dplyr::filter(sPlotData, Invader) %>%
+    dplyr::select(PlotObservationID, Species) %>%
+    dplyr::mutate(
+      sinas_loc_id = unname(plot_to_loc[as.character(PlotObservationID)])
     )
-    
-    pb <- progress::progress_bar$new(total = length(invader_species))
-    for (spec in invader_species) {
-      idx <- which(sPlotData$Species == spec)
-      sPlotData$Status[idx] <- function(
-    taxon = spec,
-    sinas_loc_ids,
-    sinas_data = sinas_data
-    )
-      gc()
-      pb$tick()
-      }
-  } else {
-    idx_map <- split(seq_len(nrow(sPlotData)), sPlotData$Species)
-    idx_map <- idx_map[intersect(invader_species, names(idx_map))]
-    idx_map <- idx_map[intersect(invader_species, names(idx_map))]
-    lon_list <- lapply(idx_map, function(idx) sPlotData$Longitude[idx])
-    lat_list <- lapply(idx_map, function(idx) sPlotData$Latitude[idx])
-    sinas_data_small <- sinas_data[sinas_data$taxon %in% names(idx_map), ]
-    n_workers <- 14
-    cat("\nRunning", n_workers, "parallel loops...")
-    species_split <- split(
-      names(idx_map),
-      rep_len(seq_len(n_workers), length(idx_map))
-    )
-    options(future.globals.maxSize = 400 * 1024^3 / n_workers) # 400 GB in total
-    results <- future.apply::future_lapply(
-      X = species_split,
-      FUN = function(spec_block, idx_map_arg, lon_list_arg, lat_list_arg) {
-        local_result <- list()
-        for (spec in spec_block) {
-          idx <- idx_map_arg[[spec]]
-          local_result[[spec]] <- list(
-            idx = idx,
-            res = tryCatch(
-              sinas_status(
-                taxon = spec,
-                lon = lon_list_arg[[spec]],
-                lat = lat_list_arg[[spec]],
-                sinas_places = sinas_places,
-                sinas_data = sinas_data_small
-              ),
-              error = function(e) {
-                cat(
-                  "\nError processing species ", spec, ": ", conditionMessage(e),
-                  file = "/home/poppman/log.txt", append = TRUE
-                )
-                rep(NA_character_, length(idx_map_arg[[spec]]))
-              }
-            )
-          )
-          if (length(local_result) %% 10 == 0) {
-            cat(
-              "\nFinished species ", spec, " of ", length(spec_block),
-              file = "/home/poppman/log.txt", append = TRUE
-            )
-          }
-        }
-        local_result
-      },
-      idx_map_arg = idx_map,
-      lon_list_arg = lon_list,
-      lat_list_arg = lat_list
-    )
-    
-    
-    flat <- unlist(results, recursive = FALSE)
-    for (x in flat) {
-      sPlotData$Status[x$idx] <- x$res
-    }
-  }
-  save(sPlotData, file = f_splot)
+  
+  is_native <- mapply(
+    FUN = function(t, loc) {loc %in% native_map[[t]]},
+    t = sPlotDataSmall$Species,
+    loc = sPlotDataSmall$sinas_loc_id,
+    SIMPLIFY = TRUE
+  )
+  
+  is_intro <- mapply(
+    FUN = function(t, loc) {loc %in% intro_map[[t]]},
+    t = sPlotDataSmall$Species,
+    loc = sPlotDataSmall$sinas_loc_id,
+    SIMPLIFY = TRUE
+  )
+  
+  sPlotDataSmall$Status[is_native & !is_intro] <- "native"
+  sPlotDataSmall$Status[is_intro & !is_native] <- "introduced"
+  sPlotDataSmall$Status[is_native & is_intro] <- "unknown"
+  sPlotDataSmall$Status[!is_native & !is_intro] <- "unknown"
+  
+  sPlotData$Status[sPlotData$Invader] <- sPlotDataSmall$Status
+  
+  save(sPlotData, file = f_splotdata)
 }
 
 
-sPlotVect <- sPlotData %>%
-  dplyr::group_by(
-    PlotObservationID, Latitude, Longitude, Releve_area, Cover_bare_soil,
-    Elevation, Naturalness, Invader
-    ) %>%
-  dplyr::summarise(
-    Relative_cover = sum(Relative_cover, na.rm = TRUE),
-    N = dplyr::n(),
-    .groups = "drop"
-  ) %>%
-  dplyr::mutate(Status = ifelse(Invader, "invasive", "native")) %>%
-  tidyr::pivot_wider(
-    id_cols = c(
+f_splotvect <- file.path(dir_imed, "splot.gpkg")
+if (file.exists(f_splotvect)) {
+  sPlotVect <- terra::vect(f_splotvect)
+} else {
+  # Allowed abundance scales for harmonisation of relative abundance
+  allowed_abundance_scales <- c("Cover", "Biomass")
+  
+  sPlotVect <- sPlotData %>%
+    dplyr::filter(Abundance_scale %in% allowed_abundance_scales) %>%
+    dplyr::rename(Elevation = Altitude) %>%
+    dplyr::group_by(
       PlotObservationID, Latitude, Longitude, Releve_area, Cover_bare_soil,
-      Elevation, Naturalness
-      ),
-    names_from = Status,
-    values_from = c(Relative_cover, N)
+      Elevation, Naturalness, Status
     ) %>%
-  tidyr::replace_na(
-    replace = list(
-      "Relative_cover_native" = 0, "Relative_cover_invasive" = 0,
-      "N_native" = 0, "N_invasive" = 0
+    dplyr::summarise(
+      Total_abundance = sum(Abundance, na.rm = TRUE),
+      N = dplyr::n(),
+      .groups = "drop"
+    ) %>%
+    tidyr::pivot_wider(
+      id_cols = c(
+        PlotObservationID, Latitude, Longitude, Releve_area, Cover_bare_soil,
+        Elevation, Naturalness
+      ),
+      names_from = Status,
+      values_from = c(Total_abundance, N)
+    ) %>%
+    tidyr::replace_na(
+      replace = list(
+        "Total_abundance_native" = 0, "Total_abundance_introduced" = 0,
+        "N_native" = 0, "N_introduced" = 0
       )
     ) %>%
-  dplyr::mutate(N_species = N_native + N_invasive) %>%
-  dplyr::filter(
-    !is.na(Releve_area)
-  ) %>%
-  dplyr::mutate(
-    BiomePatchID = terra::extract(biomes, .) %>%
-      dplyr::pull(ID)
-  ) %>%
-  terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326")
+    dplyr::mutate(N_species = N_native + N_introduced) %>%
+    dplyr::filter(
+      !is.na(Releve_area)
+    ) %>%
+    terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326") %>%
+    dplyr::mutate(
+      Relative_abundance_native = Total_abundance_native / (
+        Total_abundance_introduced + Total_abundance_native
+      ),
+      Relative_abundance_introduced = Total_abundance_introduced / (
+        Total_abundance_introduced + Total_abundance_native
+      ),
+      BiomePatchID = terra::extract(biomes, .) %>%
+        dplyr::pull(ID),
+      HumanModification = terra::extract(ghm, ., method = "bilinear") %>%
+        dplyr::pull(gHM)
+    )
+  terra::writeVector(sPlotVect, filename = f_splotvect, overwrite = TRUE)
+}
+
 
 df_sPlotBiome <- sPlotVect %>%
-  dplyr::filter(!is.na(BiomePatchID), Naturalness == "Natural") %>%
+  dplyr::filter(
+    !is.na(BiomePatchID),
+    #Naturalness == "Natural" # Current sPlot version: Mostly NA, naturalness encoded as integers
+    ) %>%
   dplyr::group_by(BiomePatchID) %>%
   dplyr::summarise(
-    Native_cover = stats::weighted.mean(
-      Relative_cover_native,
+    Native_abundande = stats::weighted.mean(
+      Relative_abundance_native,
       w = Releve_area,
       na.rm = TRUE
       ),
-    Invasive_cover = stats::weighted.mean(
-      Relative_cover_invasive,
+    Introduced_abundance = stats::weighted.mean(
+      Relative_abundance_introduced,
       w = Releve_area,
       na.rm = TRUE
     ),
     Bare_soil_cover = stats::weighted.mean(
       Cover_bare_soil,
+      w = Releve_area,
+      na.rm = TRUE
+    ),
+    HumanModification = stats::weighted.mean(
+      HumanModification,
       w = Releve_area,
       na.rm = TRUE
     ),
@@ -1549,24 +1570,26 @@ df_sPlotBiome <- sPlotVect %>%
     Biome = factor(BIOME, levels = 1:length(biome_names), labels = biome_names)
   ) %>%
   dplyr::filter(
-    as.numeric(Biome) < 14,
+    as.numeric(Biome) <= 12,
     speciesRichnessBa > 30
     ) %>%
   dplyr::mutate(
+    log_introducedAbundance = log10(Introduced_abundance),
     log_speciesRichnessBa = log(speciesRichnessBa),
     log_sampling_effort = log(sampling_effort),
     log_Connectedness = log(connectedness),
-    log_focalECA = log(focalECA)
+    log_focalECA = log(focalECA),
+    Biome = base::droplevels(Biome)
   ) %>%
   as.data.frame()
 
 # Fit a GLMM to estimate the impact of our variables
 ## Assumptions violated:
 # n <- nrow(df_sPlotBiome)
-# df_sPlotBiome$Invasive_cov <- (df_sPlotBiome$Invasive_cover * (n - 1) + 0.5) / n
+# df_sPlotBiome$Introduced_abund <- (df_sPlotBiome$Introduced_abundance * (n - 1) + 0.5) / n
 # 
 # mod <- glmmTMB::glmmTMB(
-#   Invasive_cov ~ clim_integral + log(speciesRichnessBa) +
+#   Introduced_abund ~ HumanModification + log_speciesRichnessBa + log_focalECA +
 #     (1 | Biome),
 #   family = beta_family(),
 #   data = df_sPlotBiome
@@ -1581,49 +1604,81 @@ df_sPlotBiome <- sPlotVect %>%
 # GAM per biome
 bt <- table(df_sPlotBiome$Biome)
 
+vars <- c(
+  "log_speciesRichnessBa",
+  "HumanModification",
+  "log_focalECA"
+)
+
+frml <- make_formula(
+  predictors = vars,
+  response = "Introduced_abundance",
+  biome = FALSE
+  )
+
 par(mfrow = c(2, 2))
 for (b in names(bt[bt > 10])) {
   sdf <- df_sPlotBiome[which(df_sPlotBiome$Biome == b), ]
   mod <- mgcv::gam(
-    Invasive_cover ~
-      s(log_speciesRichnessBa, k = 3) +
-      s(bottleneck_clim_integral, k = 3) +
-      s(log_focalECA, k = 3) +
-      s(log_sampling_effort, k = 3),
+    frml,
     family = quasibinomial(link = "logit"),
     data = sdf
   )
-  sm <- summary(mod)
-  cat(b, sm$dev.expl, "(GAM)\n")
   
-  vars <- c(
-    "log_speciesRichnessBa", "bottleneck_clim_integral", "log_sampling_effort",
-    "log_focalECA"
-    )
+  d2_adj_full <- ecospat::ecospat.adj.D2.glm(mod)
+  cat(b, d2_adj_full, "(GAM)\n")
   
   for (v in vars) {
     x <- sdf[[v]]
     if (all(!is.finite(x))) next
     rng <- range(x, na.rm = TRUE)
     if (!all(is.finite(rng))) next
-    grid <- data.frame(
-      log_speciesRichnessBa = mean(sdf$log_speciesRichnessBa, na.rm = TRUE),
-      bottleneck_clim_integral = mean(sdf$bottleneck_clim_integral, na.rm = TRUE),
-      log_sampling_effort = mean(sdf$log_sampling_effort, na.rm = TRUE),
-      log_focalECA = mean(sdf$log_focalECA, na.rm = TRUE)
+    grid <- as.data.frame(
+      lapply(
+        vars,
+        function(var) {
+          mean(sdf[[var]], na.rm = TRUE)
+        }
+      )
+    )
+    names(grid) <- vars
+    
+    xseq <- seq(
+      rng[1],
+      rng[2],
+      length.out = 100
     )
     
-    xseq <- seq(rng[1], rng[2], length.out = 100)
     grid <- grid[rep(1, 100), ]
     grid[[v]] <- xseq
     
+    pred <- predict(
+      mod,
+      newdata = grid,
+      type = "response"
+    )
+    
+    # Randomise focal predictor
+    sdf_rand <- sdf
+    sdf_rand[[v]] <- sample(sdf_rand[[v]])
+    
+    mod_rand <- mgcv::gam(
+      frml,
+      family = quasibinomial(link = "logit"),
+      data = sdf_rand
+    )
+    d2_adj_rand <- ecospat::ecospat.adj.D2.glm(mod_rand)
+    
+    delta_d2 <- d2_adj_full - d2_adj_rand
     pred <- predict(mod, newdata = grid, type = "response")
     
-    plot(xseq, pred,
-         type = "l",
-         main = paste(b, v),
-         xlab = v,
-         ylab = "Invasive_cover")
+    plot(
+      xseq, pred,
+      type = "l",
+      main = paste(b, v, "\nΔD²adj = ", round(delta_d2, 3)),
+      xlab = v,
+      ylab = "Invasive_cover"
+      )
   }
 }
 par(mfrow = c(1, 1))
