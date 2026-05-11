@@ -243,9 +243,9 @@ save_bhattacharyya <- function(mu1, mu2, Sigma1, Sigma2) {
 }
 
 # Check whether a species is considered native at a given location
-sinas_status <- function(taxon, lon, lat, sinas_places, sinas_data) {
+sinas_status <- function(taxon, sinas_loc_ids, sinas_data) {
   if (!(taxon %in% sinas_data$taxon)) {
-    return(rep(NA_character_, length(lon)))
+    return(rep(NA_character_, length(sinas_loc_ids)))
   }
   
   ds <- sinas_data[which(sinas_data$taxon == taxon), ]
@@ -256,18 +256,14 @@ sinas_status <- function(taxon, lon, lat, sinas_places, sinas_data) {
     length(native_loc_ids) == 0 &&
     length(introduced_loc_ids) == 0
   ) {
-    return(rep("unknown", length(lon)))
+    return(rep("unknown", length(sinas_loc_ids)))
   }
   
   native <- sinas_places[which(sinas_places$locationID %in% native_loc_ids), ]
   introduced <- sinas_places[which(sinas_places$locationID %in% introduced_loc_ids), ]
-  loc <- terra::vect(
-    data.frame(lon = lon, lat = lat),
-    geom = c("lon", "lat"),
-    crs = "epsg:4326"
-    )
-  is_native <- terra::is.related(loc, native, relation = "within")
-  is_introduced <- terra::is.related(loc, introduced, relation = "within")
+  
+  is_native <- sinas_loc_ids %in% native_loc_ids
+  is_introduced <- sinas_loc_ids %in% introduced_loc_ids
   out <- ifelse(
     is_native & !is_introduced,
     "native",
@@ -1385,6 +1381,23 @@ if (file.exists(f_splotdata)) {
   rm(sPlot)
   gc()
   
+  # Get SINaS location ID for each sPlot plot
+  # Check if sinas_places contains multiple levels (e.g. continents + countries)
+  #overlapping_places <- terra::relate(sinas_places, relation = "overlaps")
+  
+  plot_locs <- sPlotData %>%
+    dplyr::group_by(PlotObservationID) %>%
+    dplyr::summarise(
+      Longitude = dplyr::first(Longitude),
+      Latitude = dplyr::first(Latitude),
+      has_invaders = any(Invader)
+    ) %>%
+    dplyr::filter(has_invaders) %>%
+    dplyr::select(PlotObservationID, Longitude, Latitude) %>%
+    terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326")
+  
+  loc_ids <- terra::extract(sinas_places, plot_locs)
+  
   # Sinas taxa: 41187
   # sPlot taxa: 100222
   # Shared taxa: 12763 before filtering, 11613 after filtering
@@ -1397,15 +1410,13 @@ if (file.exists(f_splotdata)) {
     )
     
     pb <- progress::progress_bar$new(total = length(invader_species))
-    for (spec in invader_species[1:30]) {
+    for (spec in invader_species) {
       idx <- which(sPlotData$Species == spec)
-      sPlotData$Status[idx] <- sinas_status(
-        taxon = spec,
-        lon = sPlotData$Longitude[idx],
-        lat = sPlotData$Latitude[idx],
-        sinas_places = sinas_places,
-        sinas_data = sinas_data
-        )
+      sPlotData$Status[idx] <- function(
+    taxon = spec,
+    sinas_loc_ids,
+    sinas_data = sinas_data
+    )
       gc()
       pb$tick()
       }
