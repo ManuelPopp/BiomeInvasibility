@@ -74,7 +74,7 @@ if (Sys.info()["sysname"] == "Windows") {
 dir_dat <- file.path(dir_lud11, "poppman", "data", "bir", "dat", "lud11")
 dir_stats <- file.path(dir_main, "stats")
 dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")  # Only biome-level data
-dir_imed <- file.path(dir_dat, "biomes", biome_def, "intermediate_data", nativeness_source)  # Patch-level data
+dir_imed <- file.path(dir_imeb, nativeness_source)  # Patch-level data
 dir_fig <- file.path(dir_main, "fig", nativeness_source)
 
 if (!dir.exists(dir_fig)) {
@@ -174,14 +174,38 @@ if (!dir.exists(dir_imed)) {
 
 ## Create a model formula from a vector of predictors
 make_formula <- function(
-    predictors, k = 3, response = "Invaded", biome = TRUE
+    predictors, k = 3, response = "Invaded", biome = TRUE, interact = NA
     ) {
-  smooth_terms <- sprintf("s(%s, k = %s)", predictors, k)
-  rhs <- paste(smooth_terms, collapse = " + ")
+  if (k > 0) {
+    smooth_terms <- sprintf("s(%s, k = %s)", predictors, k)
+    rhs <- paste(smooth_terms, collapse = " + ")
+    if (!is.na(interact)) {
+      warning("Interactions not implemented for smooth terms.")
+    }
+  } else {
+    if (is.na(interact)) {
+      rhs <- paste(predictors, collapse = " + ")
+    } else {
+      if (is.integer(interact)) {
+        interact <- c(interact)
+      }
+      if (!is.numeric(interact)) {
+        stop("Parameter interact must be a vector of integers.")
+      }
+      operator <- c(rep("+", length(predictors) - 1), "")
+      operator[interact] <- "*"
+      rhs <- paste(as.vector(t(cbind(predictors, operator))), collapse = "")
+    }
+  }
   if (biome) {
     rhs <- paste(rhs, "+ Biome")
   }
   as.formula(paste(response, "~", rhs))
+}
+
+## Check dispersion
+dispersion <- function(mod) {
+  return(sum(residuals(mod, type = "pearson")^2) / mod$df.residual)
 }
 
 ## Fail-save computation of Bhattacharyya distances
@@ -555,13 +579,37 @@ max_sampling_effect <- stats::predict(
 )
 biomes$logCorrectedSR <- NA
 biomes$logCorrectedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.frame(
-  modelled = df_fit$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
+  corrected = df_fit$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
   estimated = df_fit$log_SpeciesRichness
 ) %>%
   dplyr::mutate(
-    maximum = pmax(modelled, estimated, na.rm = TRUE)
+    corrected = ifelse(
+      # Very high estimates are probably approx. accurate while very high corrected
+      # values are probably only accurate, it the estimate itself is also high.
+      exp(corrected) > 3 * exp(estimated) | exp(corrected) > 3.2e+4,
+      NA,
+      corrected
+      ),
+    estimated = ifelse(
+      exp(estimated) > 6e+4, # Amazon rainforest = some 50 k, higher is unrealistic
+      NA,
+      estimated
+    ),
+    maximum = pmax(corrected, estimated, na.rm = TRUE),
+    average = log(
+      rowMeans(
+        cbind(exp(corrected), exp(estimated)),
+        na.rm = TRUE
+      )
+    ),
+    use_average = ifelse(
+      is.na(corrected),
+      FALSE,
+      exp(corrected) > 2 * exp(estimated) | exp(estimated) > 2 * exp(corrected)
+      ),
+    use_value = ifelse(use_average, average, maximum)
   ) %>%
-  dplyr::pull(maximum)
+  dplyr::pull(use_value)
 
 #>-----------------------------------------------------------------------------<
 #> Plot species richness estimates
@@ -570,9 +618,13 @@ for (i in 1:2) {
   if (i == 1) {
     vals <- biomes$speciesRichnessBa
     fn <- "EstimatedSpeciesRichness.png"
+    mn <- "Estimated richness of vascular plant species"
+    scale_max <- max(vals, na.rm = TRUE)
   } else {
-    vals <- biomes$logCorrectedSR
+    vals <- exp(biomes$logCorrectedSR)
+    #vals[which(vals > scale_max)] <- scale_max
     fn <- "CorrectedSpeciesRichness.png"
+    mn <- "Corrected richness of vascular plant species"
   }
   vals_log <- log10(vals)
   
@@ -588,8 +640,8 @@ for (i in 1:2) {
     width = 700, height = 500
   )
   plot(
-    biomes, col = plot_cols, border = NA,
-    main = "Estimated richness of vascular plant species"
+    biomes, col = plot_cols, border = rgb(0.5, 0.5, 0.5, 0.5), lwd = 0.2,
+    main = mn
   )
   
   legend(
@@ -1329,7 +1381,7 @@ ggplot2::ggsave(
 
 
 #>=============================================================================<
-#> Add sPlot data
+#> Analyses based on sPlot data
 #<=============================================================================>
 
 # sPlot
@@ -1488,18 +1540,21 @@ if (file.exists(f_splotvect)) {
     dplyr::filter(Abundance_scale %in% allowed_abundance_scales) %>%
     dplyr::rename(Elevation = Altitude) %>%
     dplyr::group_by(
-      PlotObservationID, Latitude, Longitude, Releve_area, Cover_bare_soil,
-      Elevation, Naturalness, Status
+      PlotObservationID, Latitude, Longitude, Elevation, Releve_area,
+      Cover_bare_soil, Cover_bare_rock, Cover_open_water, Cover_forbs,
+      Naturalness, Grassland, Shrubland, Forest, Wetland, Layer, Status
     ) %>%
     dplyr::summarise(
-      Total_abundance = sum(Abundance, na.rm = TRUE),
+      Total_abundance = sum(Rel_Abund_Layer, na.rm = TRUE),
       N = dplyr::n(),
       .groups = "drop"
     ) %>%
     tidyr::pivot_wider(
       id_cols = c(
-        PlotObservationID, Latitude, Longitude, Releve_area, Cover_bare_soil,
-        Elevation, Naturalness
+        PlotObservationID, Latitude, Longitude, Elevation, Releve_area,
+        Cover_bare_soil, Cover_bare_rock, Cover_open_water, Cover_forbs,
+        Naturalness, Grassland, Shrubland, Forest, Wetland,
+        Elevation, Naturalness, Layer
       ),
       names_from = Status,
       values_from = c(Total_abundance, N)
@@ -1513,6 +1568,12 @@ if (file.exists(f_splotvect)) {
     dplyr::mutate(N_species = N_native + N_introduced) %>%
     dplyr::filter(
       !is.na(Releve_area)
+    ) %>%
+    dplyr::group_by(dplyr::across(-Layer)) %>%
+    dplyr::summarise(
+      Total_abundance_native = max(Total_abundance_native, na.rm = TRUE),
+      Total_abundance_introduced = max(Total_abundance_introduced, na.rm = TRUE),
+      .groups = "drop"
     ) %>%
     terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326") %>%
     dplyr::mutate(
@@ -1536,9 +1597,11 @@ df_sPlotBiome <- sPlotVect %>%
     !is.na(BiomePatchID),
     #Naturalness == "Natural" # Current sPlot version: Mostly NA, naturalness encoded as integers
     ) %>%
-  dplyr::group_by(BiomePatchID) %>%
+  dplyr::group_by(# Summarise plots within a biome patch by relative area
+    BiomePatchID, Grassland, Shrubland, Forest, Wetland
+    ) %>%
   dplyr::summarise(
-    Native_abundande = stats::weighted.mean(
+    Native_abundance = stats::weighted.mean(
       Relative_abundance_native,
       w = Releve_area,
       na.rm = TRUE
@@ -1547,7 +1610,7 @@ df_sPlotBiome <- sPlotVect %>%
       Relative_abundance_introduced,
       w = Releve_area,
       na.rm = TRUE
-    ),
+      ),
     Bare_soil_cover = stats::weighted.mean(
       Cover_bare_soil,
       w = Releve_area,
@@ -1557,7 +1620,8 @@ df_sPlotBiome <- sPlotVect %>%
       HumanModification,
       w = Releve_area,
       na.rm = TRUE
-    ),
+      ),
+    Sum_area = sum(Releve_area, na.rm = TRUE),
     .groups = "drop"
   ) %>%
   dplyr::left_join(
@@ -1573,15 +1637,112 @@ df_sPlotBiome <- sPlotVect %>%
     as.numeric(Biome) <= 12,
     speciesRichnessBa > 30
     ) %>%
+  dplyr::mutate(# Remove veg. types that do not match expected climax veg.
+    Biome = base::droplevels(Biome),
+    BiomeOK = BIOME %in% c(
+      1:6, 12
+      ) & Forest | BIOME %in% 7:11 & Grassland | BIOME %in% c(
+        9, 11, 14
+        ) & Wetland | BIOME %in% c(8, 9, 12, 13) & Shrubland
+  ) %>%
+  dplyr::filter(BiomeOK) %>%
+  dplyr::group_by(# Summarise again, to average over allowed vegetation types
+    dplyr::across(-c(Grassland, Shrubland, Forest, Wetland))
+    ) %>%
+  dplyr::summarise(
+    Native_abundance = stats::weighted.mean(
+      Native_abundance,
+      w = Sum_area,
+      na.rm = TRUE
+      ),
+    Introduced_abundance = stats::weighted.mean(
+      Introduced_abundance,
+      w = Sum_area,
+      na.rm = TRUE
+      ),
+    Bare_soil_cover = stats::weighted.mean(
+      Bare_soil_cover,
+      w = Sum_area,
+      na.rm = TRUE
+      ),
+    HumanModification = stats::weighted.mean(
+      HumanModification,
+      w = Sum_area,
+      na.rm = TRUE
+      ),
+    .groups = "drop"
+    ) %>%
   dplyr::mutate(
-    log_introducedAbundance = log10(Introduced_abundance),
+    log_introducedAbundance = log1p(Introduced_abundance),
     log_speciesRichnessBa = log(speciesRichnessBa),
     log_sampling_effort = log(sampling_effort),
     log_Connectedness = log(connectedness),
-    log_focalECA = log(focalECA),
-    Biome = base::droplevels(Biome)
+    log_focalECA = log(focalECA)
   ) %>%
   as.data.frame()
+
+
+bi_tab <- table(df_sPlotBiome$Biome)
+gg_abundance_list <- list()
+for (bi in names(bi_tab)[bi_tab > 10]) {
+  summary_tab <- df_sPlotBiome %>%
+    dplyr::filter(
+      Biome == bi
+    ) %>%
+    dplyr::summarise(
+      median_invasion = median(
+        Introduced_abundance[Introduced_abundance > 0],
+        na.rm = TRUE
+      ),
+      n_none = sum(Introduced_abundance == 0, na.rm = TRUE),
+      n_low = sum(
+        Introduced_abundance > 0 &
+          Introduced_abundance < median_invasion,
+        na.rm = TRUE
+      ),
+      n_high = sum(
+        Introduced_abundance >= median_invasion,
+        na.rm = TRUE
+      )
+    )
+  
+  lvls <- c(
+    paste0("none (N=", summary_tab$n_none, ")"),
+    paste0("low (N=", summary_tab$n_low, ")"),
+    paste0("high (N=", summary_tab$n_high, ")")
+  )
+  
+  
+  df_biome <- df_sPlotBiome %>%
+    dplyr::filter(
+      Biome == bi,
+      !is.na(Introduced_abundance)
+    ) %>%
+    dplyr::mutate(
+      Invasion_level = factor(
+        dplyr::case_when(
+          Introduced_abundance == 0 ~ lvls[1],
+          Introduced_abundance < summary_tab$median_invasion ~ lvls[2],
+          Introduced_abundance >= summary_tab$median_invasion ~ lvls[3]
+        ),
+        levels = lvls,
+        ordered = TRUE
+      )
+    )
+  
+  gg_abundance_list[[bi]] <- ggplot2::ggplot(
+    data = df_biome,
+    ggplot2::aes(x = Invasion_level, y = focalECA, fill = Invasion_level)
+  ) +
+    ggplot2::geom_boxplot() +
+    ggplot2::scale_y_log10() +
+    ggplot2::theme_bw() +
+    ggplot2::theme(legend.position = "none") +
+    ggplot2::ggtitle(bi) +
+    ggplot2::xlab("Introduced invasive species abundance") +
+    ggplot2::ylab("Connected area (log scaled)")
+}
+
 
 # Fit a GLMM to estimate the impact of our variables
 ## Assumptions violated:
@@ -1602,90 +1763,98 @@ df_sPlotBiome <- sPlotVect %>%
 # plot(sim)
 
 # GAM per biome
-bt <- table(df_sPlotBiome$Biome)
 
 vars <- c(
-  "log_speciesRichnessBa",
+  "log_focalECA",
   "HumanModification",
-  "log_focalECA"
+  "climateVelocityRank"
 )
+
+fam <- stats::gaussian()
 
 frml <- make_formula(
   predictors = vars,
-  response = "Introduced_abundance",
+  response = "Introduced_abundance_logit_boundary_corrected",
+  k = 0,
   biome = FALSE
   )
 
-par(mfrow = c(2, 2))
-for (b in names(bt[bt > 10])) {
-  sdf <- df_sPlotBiome[which(df_sPlotBiome$Biome == b), ]
-  mod <- mgcv::gam(
+if(!dir.exists(file.path(dir_fig, "sPlotResponse"))) {
+  dir.create(file.path(dir_fig, "sPlotResponse"))
+}
+for (bi in names(bi_tab[bi_tab >= 15])) {
+  biname_clean <- gsub("[^[:alpha:]]", "", bi, perl = TRUE)
+  
+  sdf <- df_sPlotBiome %>%
+    dplyr::filter(Biome == bi) %>%
+    dplyr::mutate(
+      climateVelocityRank = qnorm(
+        rank(climate_velocity_kmpa) / (length(climate_velocity_kmpa) + 1)
+      )
+    )
+  cor(sdf[vars], use = "pairwise.complete.obs")
+  
+  n <- sum(!is.na(sdf$Introduced_abundance))
+  sdf$Introduced_abundance_logit_boundary_corrected <- qlogis(
+    (sdf$Introduced_abundance * (n - 1) + 0.5) / n
+  )
+  mod_full <- glm(
     frml,
-    family = quasibinomial(link = "logit"),
+    family = fam,
     data = sdf
   )
   
-  d2_adj_full <- ecospat::ecospat.adj.D2.glm(mod)
-  cat(b, d2_adj_full, "(GAM)\n")
+  d2_adj_full <- ecospat::ecospat.adj.D2.glm(mod_full)
+  cat("\n\n", bi, "D2:", d2_adj_full, "(GLM)\n")
+  coefs <- summary(mod_full)$coefficients
   
-  for (v in vars) {
-    x <- sdf[[v]]
-    if (all(!is.finite(x))) next
-    rng <- range(x, na.rm = TRUE)
-    if (!all(is.finite(rng))) next
-    grid <- as.data.frame(
-      lapply(
-        vars,
-        function(var) {
-          mean(sdf[[var]], na.rm = TRUE)
-        }
-      )
+  par(mfrow = c(2, 2), mar = c(2, 2, 2, 0))
+  plot(mod_full)
+  par(mfrow = c(1, 1))
+  
+  # Check variable importance
+  stats::drop1(mod_full, test = "Chisq")
+  df_list_vars <- list()
+  for (i in 1:length(vars)) {
+    var <- vars[i]
+    frml_red <- make_formula(
+      predictors = vars[-i],
+      response = "Introduced_abundance_logit_boundary_corrected",
+      k = 0,
+      biome = FALSE
     )
-    names(grid) <- vars
-    
-    xseq <- seq(
-      rng[1],
-      rng[2],
-      length.out = 100
+    mod_red <- glm(
+      frml_red,
+      family = fam,
+      data = sdf
     )
-    
-    grid <- grid[rep(1, 100), ]
-    grid[[v]] <- xseq
-    
-    pred <- predict(
-      mod,
-      newdata = grid,
-      type = "response"
-    )
-    
-    # Randomise focal predictor
-    sdf_rand <- sdf
-    sdf_rand[[v]] <- sample(sdf_rand[[v]])
-    
-    mod_rand <- mgcv::gam(
-      frml,
-      family = quasibinomial(link = "logit"),
-      data = sdf_rand
-    )
-    d2_adj_rand <- ecospat::ecospat.adj.D2.glm(mod_rand)
-    
-    delta_d2 <- d2_adj_full - d2_adj_rand
-    pred <- predict(mod, newdata = grid, type = "response")
-    
-    plot(
-      xseq, pred,
-      type = "l",
-      main = paste(b, v, "\nΔD²adj = ", round(delta_d2, 3)),
-      xlab = v,
-      ylab = "Invasive_cover"
+    delta_aic <- AIC(mod_red) - AIC(mod_full)
+    tabanova <- anova(mod_red, mod_full, test = "Chisq")
+    dev <- tabanova$Deviance[2]
+    p <- tabanova[2, 5]
+    df <- tabanova$Df[2]
+    df_list_vars[[i]] <- data.frame(
+      Variable = var, df = df, dev = dev, p_Chisq = p, delta_aic = delta_aic
       )
   }
+  
+  df_vars <- coefs[-1, ] %>%
+    as.data.frame() %>%
+    dplyr::mutate(
+      Variable = row.names(.)
+    ) %>%
+    dplyr::left_join(
+      do.call(rbind, df_list_vars),
+      by = "Variable"
+    )  %>%
+    dplyr::relocate(Variable)
+  
+  print(df_vars)
 }
-par(mfrow = c(1, 1))
 
 
 #>=============================================================================<
-#> Statistical analyses
+#> Biome-patch-level analyses on invasion probability
 #<=============================================================================>
 
 env_dat <- readRDS(f_env_dat)
@@ -1709,7 +1878,7 @@ max_lobBhat <- 1.34
 # Create sample data frame
 future::plan(multisession, workers = parallel::detectCores() - 1)
 
-f_invasion <- file.path(dir_imeb, "df_invasion.Rsave")
+f_invasion <- file.path(dir_imed, "df_invasion.Rsave")
 if (file.exists(f_invasion)) {
   load(f_invasion)
 } else {
@@ -2027,6 +2196,7 @@ for (i in 1:(length(predictors) + 1)) {
       single_adjD2 = adjD2_single
     )
   )
+  gc()
   pb$tick()
 }
 rm(pb)
@@ -2094,6 +2264,7 @@ if(!dir.exists(dir_plots)) {
 }
 plot_list <- list()
 for (bi in sort(unique(df_mod$Biome))) {
+  stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
   w <- subset(df_mod, Biome == bi) %>%
     dplyr::group_by(Species, Invaded) %>%
     dplyr::summarise(
@@ -2128,19 +2299,23 @@ for (bi in sort(unique(df_mod$Biome))) {
   # Get delta D2 for each predictor
   delta_adjD2_p <- c()
   for (p in predictors) {
-    df_rand <- df_bi %>%
-      dplyr::mutate(
-        "{p}" := sample(.data[[p]])
+    adjD2_rand_c <- c()
+    for (i in 1:100) {
+      df_rand <- df_bi %>%
+        dplyr::mutate(
+          "{p}" := sample(.data[[p]])
+        )
+      
+      mod_rand <- mgcv::gam(
+        frml_bi,
+        data = df_rand,
+        method = "REML",
+        family = stats::binomial("logit"),
+        weights = weight
       )
-    
-    mod_rand <- mgcv::gam(
-      frml_bi,
-      data = df_rand,
-      method = "REML",
-      family = stats::binomial("logit"),
-      weights = weight
-    )
-    adjD2_rand <- ecospat::ecospat.adj.D2.glm(mod_rand)
+      adjD2_rand_c <- c(adjD2_rand_c, ecospat::ecospat.adj.D2.glm(mod_rand))
+    }
+    adjD2_rand <- mean(adjD2_rand_c, na.rm = TRUE)
     delta_adjD2_p <- c(delta_adjD2_p, adjD2_bi - adjD2_rand)
   }
   names(delta_adjD2_p) <- predictors
@@ -2320,18 +2495,27 @@ for (bi in sort(unique(df_mod$Biome))) {
 plot_list[[1]]
 
 
-stop("The rest doesn't work.")
 #>=============================================================================<
 #> Invasive species breeder model
 #>=============================================================================<
+
+
+# Open questions: Do we also need patches that donate zero invasives to meet
+# distribution assumptions?
+#
+# Should we assign each invasive species to the patch with most observations,
+# or should we count each invasive for each patch where it has been observed?
+# The former one might solve the "issue" of zero observations.
+#
+# Why would sampling intensity explain anything here? (It is a bit logical if we assign by "most counts")
 
 df_donor <- merged_env %>%
   dplyr::filter(
     as.numeric(Biome) <= 12,
     as.numeric(Biome) != 10,
     total_area > 100,
-    Status == "Donor",
-    logCorrectedSR > log(50)
+    #Status == "Donor",
+    logCorrectedSR > log(100)
   ) %>%
   dplyr::mutate(
     Biome = base::droplevels(Biome),
@@ -2340,13 +2524,14 @@ df_donor <- merged_env %>%
     logConnArea = log(focalECA),
     SpeciesRichness = tidyr::replace_na(round(correctedSR, 0), 0)
     ) %>%
-  dplyr::group_by(Species, Status) %>%
-  dplyr::filter( # Assign the origin of each invasive species to the patch with its highest frequency
-    Count == max(Count)
-    ) %>%
+  # dplyr::group_by(Species, Status) %>%
+  # dplyr::filter( # Assign the origin of each invasive species to the patch with its highest frequency
+  #   Count == max(Count)
+  #   ) %>%
   dplyr::group_by(
     Biome, PatchID, log_total_area, focalECA, connectedness,
-    SpeciesRichness, Status, climateVelocity, climateStability
+    SpeciesRichness, Status, climateVelocity, climateStability,
+    log_sampling_effort
     ) %>%
   dplyr::summarise(
     N = dplyr::n(),
@@ -2355,7 +2540,8 @@ df_donor <- merged_env %>%
   tidyr::pivot_wider(
     id_cols = c(
       Biome, PatchID, log_total_area, focalECA, connectedness,
-      SpeciesRichness, climateVelocity, climateStability
+      SpeciesRichness, climateVelocity, climateStability,
+      log_sampling_effort
       ),
     names_from = Status,
     values_from = N
@@ -2368,93 +2554,53 @@ df_donor <- merged_env %>%
     DonorOf < SpeciesRichness
     ) %>%
   dplyr::mutate(
+    log_focalECA = log(focalECA),
     PropInvasive = DonorOf / SpeciesRichness,
     failures = pmax(SpeciesRichness - DonorOf, 0),
     successRate = DonorOf / SpeciesRichness,
     successProb = successRate / (1 - successRate)
   )
 
-plot(log(successProb) ~ log(focalECA), data = df_donor)
 
-
-
-
-df_donor_inla <- df_donor %>%
-  dplyr::group_by(Biome) %>%
-  dplyr::filter(dplyr::n() >= 10) %>%
-  dplyr::ungroup() %>%
-  dplyr::mutate(
-    Biome = droplevels(Biome)
+## GLM by biome -> variance exceeds the expected under binomial sampling process
+d2s <- c()
+for (bi in levels(df_donor$Biome)) {
+  df_curr <- df_donor %>%
+    dplyr::filter(Biome == bi) %>%
+    dplyr::mutate(
+      climateVelocityRank = qnorm(
+        rank(climateVelocity) / (length(climateVelocity) + 1)
+      )
+    )
+  
+  modInvasiveBreeder_glm <- stats::glm(
+    cbind(DonorOf, failures) ~ log_focalECA + climateVelocityRank + log_sampling_effort,
+    data = df_curr,
+    family = stats::quasibinomial()
   )
-
-library("INLA") # Check out mgcv::ginla https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
-
-modInvasiveBreeder_inla <- INLA::inla(
-  cbind(DonorOf, failures) ~
-    log(focalECA) +
-    f(Biome, model = "iid"),
+  d2 <- ecospat::ecospat.adj.D2.glm(modInvasiveBreeder_glm)
+  summary(modInvasiveBreeder_glm)
+  coef_tab_glm <- summary(modInvasiveBreeder_glm)$coefficients
+  d2s <- c(d2s, d2)
+  cat("\n", bi, "D2:", d2, "\n")
+  print(coef_tab_glm)
+  par(mfrow = c(2, 2))
+  plot(modInvasiveBreeder_glm)
+  par(mfrow = c(1, 1))
   
-  family = "binomial",
-  data = df_donor_inla,
-  
-  control.predictor = list(compute = TRUE),
-  control.compute = list(dic = TRUE, waic = TRUE)
-)
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-## GLM that includes biome
-modInvasiveBreeder_glm <- stats::glm(
-  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + factor(Biome),
-  data = df_donor,
-  family = stats::quasibinomial()
-)
-
-summary(modInvasiveBreeder_glm)
-coef_tab_glm <- summary(modInvasiveBreeder_glm)$coefficients
-
-## GLMM that controls for biome
-cor(df_donor$focalECA, df_donor$SpeciesRichness, use = "complete.obs")
-modInvasiveBreeder_glmm <- lme4::glmer(
-  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + (1 | Biome),
-  data = df_donor,
-  family = binomial
-)
-
-summary(modInvasiveBreeder_glmm)
-performance::r2(modInvasiveBreeder_glmm)
-anova(modInvasiveBreeder_glmm)
-
-overdisp_fun <- function(model) {
-  rdf <- df.residual(model)
-  rp <- residuals(model, type = "pearson")
-  sum(rp^2) / rdf
+  cat("\nDispersion:", dispersion(modInvasiveBreeder_glm), "\n\n")
 }
 
-overdisp_fun(modInvasiveBreeder_glmm)
 
-## Betabinomial GLMM
+## Betabinomial GLMM -> Model assumptions still violated
 modInvasiveBreeder_bb <- glmmTMB::glmmTMB(
-  cbind(DonorOf, failures) ~ log(focalECA) + log(SpeciesRichness) + (1 | Biome),
+  cbind(DonorOf, failures) ~ log(focalECA) + log_sampling_effort + (1|Biome),
   data = df_donor,
   family = glmmTMB::betabinomial()
 )
 
 summary(modInvasiveBreeder_bb)
+performance::check_singularity(modInvasiveBreeder_bb)
 performance::r2(modInvasiveBreeder_bb)
 MuMIn::r.squaredGLMM(modInvasiveBreeder_bb)
 res <- DHARMa::simulateResiduals(modInvasiveBreeder_bb)
@@ -2462,592 +2608,53 @@ DHARMa::testDispersion(res)
 DHARMa::plotResiduals(res)
 DHARMa::testZeroInflation(res)
 
-df_donor_copy <- df_donor
-r2 <- c()
-for (i in 1:100) {
-  df_donor_copy$DonorOf <- sample(df_donor$DonorOf)
-  df_donor_copy$failures <- pmax(df_donor_copy$SpeciesRichness - df_donor_copy$DonorOf, 0)
-  mod <- glmmTMB::glmmTMB(
-    cbind(DonorOf, failures) ~ log(Area) + log(SpeciesRichness) + (1 | Biome),
-    data = df_donor_copy,
-    family = glmmTMB::betabinomial()
+
+## GAM
+predictors <- c("log_focalECA", "climateVelocityRank", "log_sampling_effort")
+frml <- make_formula(
+  predictors = predictors, response = "cbind(DonorOf, failures)", biome = FALSE
+)
+d2s <- c()
+for (bi in levels(df_donor$Biome)) {
+  df_curr <- df_donor %>%
+    dplyr::filter(Biome == bi) %>%
+    dplyr::mutate(
+      climateVelocityRank = qnorm(
+        rank(climateVelocity) / (length(climateVelocity) + 1)
+      )
+    )
+  
+  modInvasiveBreeder_gam <- mgcv::gam(
+    frml,
+    family = stats::quasibinomial(),
+    data = df_curr
   )
-  r2 <- c(r2, MuMIn::r.squaredGLMM(mod)[1])
+  summary(modInvasiveBreeder_gam)
+  
+  # Plot some diagnostics
+  par(mfrow = c(2, 2))
+  gam.check(modInvasiveBreeder_gam, cex = 5)
+  mtext(bi, side = 3, line = 3)
+  par(mfrow = c(1, 1))
+  d2 <- ecospat::ecospat.adj.D2.glm(modInvasiveBreeder_gam)
+  par(mfrow = c(2, 2))
+  plot(modInvasiveBreeder_gam, residuals = TRUE, cex = 5, main = bi)
+  par(mfrow = c(1, 1))
+  # modInvasiveBreeder_gamm <- glmmTMB::glmmTMB(
+  #   frml,
+  #   family = glmmTMB::betabinomial(),
+  #   data = df_curr
+  # )
+  # par(mfrow = c(2, 2))
+  # plot(modInvasiveBreeder_gamm)
+  # par(mfrow = c(1, 1))
+  # d2 <- ecospat::ecospat.adj.D2.glm(modInvasiveBreeder_gamm)
+  # summary(modInvasiveBreeder_gamm)
+  # res <- DHARMa::simulateResiduals(modInvasiveBreeder_gamm)
+  # plot(res)
+  # DHARMa::testDispersion(res)
+  # summary(modInvasiveBreeder_gamm)
+  # MuMIn::r.squaredGLMM(modInvasiveBreeder_gamm)
+  d2s <- c(d2s, d2)
+  cat("\n", bi, "D2:", d2, "\n")
 }
-max(r2)
-hist(r2)
-abline(v = MuMIn::r.squaredGLMM(modInvasiveBreeder_bb)[1])
-
-
-modInvasiveBreeder_gam <- mgcv::gam(
-  cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3) + Biome,
-  data = df_donor,
-  method = "REML",
-  family = stats::binomial("logit")
-  )
-
-plot(modInvasiveBreeder_gam, pages = 1, shade = TRUE)
-summary(modInvasiveBreeder_gam)
-ecospat::ecospat.adj.D2.glm(modInvasiveBreeder_gam)
-
-
-# sequence across observed range
-newdata <- expand.grid(
-  SpeciesRichness = seq(min(df_donor$SpeciesRichness), max(df_donor$SpeciesRichness), length.out = 100),
-  Biome = levels(df_donor$Biome)
-)
-newdata$log_SpeciesRichness <- log(newdata$SpeciesRichness)
-
-pred <- predict(modInvasiveBreeder_gam, newdata, type = "response", se.fit = TRUE)
-newdata$fit <- pred$fit
-newdata$lower <- pred$fit - 1.96 * pred$se.fit
-newdata$upper <- pred$fit + 1.96 * pred$se.fit
-
-ggplot(newdata, aes(x = SpeciesRichness, y = fit, color = Biome, fill = Biome)) +
-  geom_line(colour = "black") +
-  geom_ribbon(aes(ymin = lower, ymax = upper), alpha = 0.1) +
-  labs(x = "Species Richness", y = "Predicted probability") +
-  theme_minimal()
-
-
-
-
-
-library("mgcViz")
-check_model <- function(mod) {
-  # simulate residuals for DHARMa
-  sim <- DHARMa::simulateResiduals(mod, plot = FALSE)
-  
-  # run tests
-  disp_test <- DHARMa::testDispersion(sim)
-  outlier_test <- DHARMa::testOutliers(sim)
-  uni_test <- DHARMa::testUniformity(sim)
-  
-  # count minor/major issues
-  minor <- sum(c(disp_test$p.value, uni_test$p.value) < 0.05)
-  major <- sum(c(outlier_test$p.value) < 0.05)
-  
-  if (minor == 0 && major == 0) {
-    return("OK")
-  } else {
-    paste0(
-      if (major > 0) paste0(major, " major issue", if (major > 1) "s" else "") else "",
-      if (major > 0 & minor > 0) ", " else "",
-      if (minor > 0) paste0(minor, " minor issue", if (minor > 1) "s" else "") else ""
-    )
-  }
-}
-
-pdf(file.path(dir_fig, "biome_response_curves.pdf"), width = 10, height = 5)
-par(
-  mfrow = c(1, 2),
-  mar = c(4, 4, 3, 1),   # inner margins
-  oma = c(0, 0, 4, 0)    # outer margins (TOP increased)
-)
-for (biome in sort(unique(df_donor$Biome))) {
-  
-  df_sset <- df_donor[df_donor$Biome == biome, ]
-  n_patches <- dplyr::n_distinct(df_sset$PatchID)
-  
-  if (n_patches < 15) {
-    next
-  }
-  
-  # ----- GLM -----
-  mod_glm <- stats::glm(
-    cbind(DonorOf, failures) ~ log(SpeciesRichness),
-    data = df_sset,
-    family = stats::quasibinomial()
-  )
-  
-  dev_glm <- 1 - mod_glm$deviance / mod_glm$null.deviance
-  
-  # ----- GAM -----
-  mod_gam <- mgcv::gam(
-    cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3),
-    data = df_sset,
-    method = "REML",
-    family = stats::binomial("logit")
-  )
-  
-  dev_gam <- ecospat::ecospat.adj.D2.glm(mod_gam)
-  
-  # ----- Prediction grid -----
-  x_seq <- seq(
-    min(df_sset$SpeciesRichness, na.rm = TRUE),
-    max(df_sset$SpeciesRichness, na.rm = TRUE),
-    length.out = 100
-  )
-  
-  newdata <- data.frame(
-    SpeciesRichness = x_seq
-  )
-  
-  # GLM prediction
-  pred_glm <- predict(
-    mod_glm,
-    newdata = newdata,
-    type = "response"
-  )
-  
-  # GAM prediction
-  pred_gam <- predict(
-    mod_gam,
-    newdata = newdata,
-    type = "response"
-  )
-  
-  # Check models
-  mod_glm_check <- stats::glm(
-    cbind(DonorOf, failures) ~ log(SpeciesRichness),
-    data = df_sset,
-    family = stats::binomial()
-  )
-  
-  diag_glm <- check_model(mod_glm_check)
-  diag_gam <- check_model(mod_gam)
-  
-  # ----- Plot -----
-  ids <- unique(df_sset$PatchID)
-  
-  # plot base map
-  plot(biomes, border = "grey75")
-  
-  # highlight subset polygons
-  subset_polys <- biomes[biomes$ID %in% ids, ]
-  plot(subset_polys, col = "red", add = TRUE)
-  
-  # compute centroids
-  cent <- terra::centroids(subset_polys)
-  coords <- terra::crds(cent)
-  
-  # define an offset for arrows (adjust depending on map scale)
-  offset <- max(terra::ext(biomes)[2:3] - terra::ext(biomes)[1:2]) * 0.02
-  
-  # draw arrows from offset positions pointing to centroids
-  arrows(
-    x0 = coords[,1] + offset,
-    y0 = coords[,2] + offset,
-    x1 = coords[,1],
-    y1 = coords[,2],
-    length = 0.1,
-    col = "blue",
-    lwd = 2.5
-  )
-  
-  par(mfrow = c(1, 2), mar = c(4, 4, 3, 1))
-  
-  # GLM plot
-  plot(
-    df_sset$SpeciesRichness,
-    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
-    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
-    xlab = "Species Richness",
-    ylab = "Probability",
-    main = paste0("GLM\nD² = ", round(dev_glm, 3), "\nModel checks:", diag_glm),
-    log = "x"
-  )
-  lines(x_seq, pred_glm, lwd = 2)
-  
-  # GAM plot
-  plot(
-    df_sset$SpeciesRichness,
-    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
-    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
-    xlab = "Species Richness",
-    ylab = "Probability",
-    main = paste0("GAM\nD² = ", round(dev_gam, 3), "\nModel checks:", diag_gam),
-    log = "x"
-  )
-  lines(x_seq, pred_gam, lwd = 2)
-  
-  # page title
-  mtext(
-    paste0("Biome: ", biome, "   |   N patches = ", n_patches),
-    outer = TRUE,
-    line = 1,
-    cex = 1.2
-  )
-}
-
-dev.off()
-
-
-
-
-
-for (i in 1:14) {
-  biome <- biome_names[i]
-  df_sset <- df_donor[df_donor$Biome == biome, ]
-  n_patches <- dplyr::n_distinct(df_sset$PatchID)
-  
-  if (n_patches < 15) {
-    next
-  }
-  
-  dev_glms <- c()
-  dev_gams <- c()
-  glms <- list()
-  gams <- list()
-  for (i in 1:30) {
-    # Number of bins along SpeciesRichness
-    n_bins <- 10
-    max_per_bin <- 3
-    
-    df_sset_sample <- df_sset %>%
-      mutate(bin = cut(SpeciesRichness, breaks = n_bins, include.lowest = TRUE)) %>%
-      group_by(bin) %>%
-      group_modify(~ slice_sample(.x, n = min(nrow(.x), max_per_bin)), .keep = FALSE) %>%
-      ungroup() %>%
-      select(-bin)
-    
-    # Check distribution
-    table(cut(df_sset_sample$SpeciesRichness, breaks = n_bins))
-    
-    # ----- GLM -----
-    mod_glm <- stats::glm(
-      cbind(DonorOf, failures) ~ log(SpeciesRichness),
-      data = df_sset_sample,
-      family = stats::quasibinomial()
-    )
-    
-    dev_glm <- 1 - mod_glm$deviance / mod_glm$null.deviance
-    dev_glms <- c(dev_glms, dev_glm)
-    glms[[i]] <- mod_glm
-    
-    # ----- GAM -----
-    mod_gam <- mgcv::gam(
-      cbind(DonorOf, failures) ~ s(log(SpeciesRichness), k = 3),
-      data = df_sset_sample,
-      method = "REML",
-      family = stats::binomial("logit")
-    )
-    
-    dev_gam <- ecospat::ecospat.adj.D2.glm(mod_gam)
-    dev_gams <- c(dev_gams, dev_gam)
-    gams[[i]] <- mod_gam
-  }
-  
-  hist(dev_glms)
-  hist(dev_gams)
-  
-  dev_glms[dev_glms > 1] <- 0
-  dev_gams[dev_gams > 1] <- 0
-  
-  x_seq <- seq(
-    min(df_sset$SpeciesRichness, na.rm = TRUE),
-    max(df_sset$SpeciesRichness, na.rm = TRUE),
-    length.out = 100
-  )
-  
-  newdata <- data.frame(
-    SpeciesRichness = x_seq
-  )
-  
-  # GLM plot
-  grDevices::svg(
-    filename = file.path(
-      "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/fig/model_tests",
-      paste0("GLM_", biome, ".svg")
-    ), width = 7, height = 5
-  )
-  plot(
-    df_sset$SpeciesRichness,
-    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
-    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
-    xlab = "Species Richness",
-    ylab = "Probability",
-    main = paste0(biome, ": GLM\nmean D² = ", round(mean(dev_glms), 2)),
-    log = "x"
-  )
-  
-  # GLM prediction
-  for (i in 1:length(glms)) {
-    pred_glm <- predict(
-      glms[[i]],
-      newdata = newdata,
-      type = "response"
-    )
-    lines(x_seq, pred_glm, lwd = 2, col = rgb(1, 0, 0, pmax(dev_glms[i], 0)))
-  }
-  dev.off()
-  
-  # GAM plot
-  grDevices::svg(
-    filename = file.path(
-      "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir/fig/model_tests",
-      paste0("GAM_", biome, ".svg")
-      ), width = 7, height = 5
-  )
-  plot(
-    df_sset$SpeciesRichness,
-    df_sset$DonorOf / (df_sset$DonorOf + df_sset$failures),
-    pch = 16, cex = log(df_sset$OlsonArea) / log(max(df_sset$OlsonArea)),
-    xlab = "Species Richness",
-    ylab = "Probability",
-    main = paste0(biome, ": GAM\nD² = ", round(mean(dev_gams), 2)),
-    log = "x"
-  )
-  
-  # GAM prediction
-  for (i in 1:length(gams)) {
-    pred_gam <- predict(
-      gams[[i]],
-      newdata = newdata,
-      type = "response"
-    )
-    lines(x_seq, pred_gam, lwd = 2, col = rgb(0, 1, 0, pmax(dev_gams[i], 0)))
-  }
-  dev.off()
-}
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-df_donor$SpeciesRichness <- sample(df_donor$SpeciesRichness)
-df_donor$failures <- pmax(df_donor$SpeciesRichness - df_donor$DonorOf, 0) 
-
-
-
-df_within <- merged %>%
-  dplyr::mutate(
-    PatchID = ID,
-    Area = lowland_area,
-    SpeciesRichness = round(speciesRichnessBa, 0)
-  ) %>%
-  dplyr::group_by(Species, Status) %>%
-  dplyr::filter(
-    Count > 10,
-    SpeciesRichness > 50
-  ) %>%
-  dplyr::group_by(BiomeID, Biome, Species, clusterID, Status) %>%
-  dplyr::summarise(
-    Count = sum(Count),
-    clusterRichness = max(speciesRichnessBa, na.rm = TRUE),
-    focalECA = max(focalECA, na.rm = TRUE),
-    connectedness = max(connectedness, na.rm = TRUE),
-    .groups = "drop"
-  ) %>%
-  dplyr::group_by(BiomeID, Biome, Species, Status) %>%
-  dplyr::filter(
-    Count == max(Count, na.rm = TRUE)
-  ) %>%
-  dplyr::filter(# Addiditonal filter, since in some cases, multiple clusters have max(Count)
-    clusterRichness == max(clusterRichness)
-  ) %>%
-  dplyr::ungroup() %>%
-  dplyr::group_by(BiomeID, Biome, Species) %>%
-  dplyr::filter(!duplicated(clusterID)) %>%
-  dplyr::filter(dplyr::n_distinct(Status) == 2) %>%
-  dplyr::ungroup()
-
-ggplot2::ggplot(
-  data = df_within,
-  ggplot2::aes(y = log(clusterRichness), colour = Status)
-  ) +
-  ggplot2::geom_boxplot() +
-  ggplot2::facet_wrap(.~Biome) +
-  ggplot2::theme_bw()
-
-df_wide_richness <- df_within %>%
-  dplyr::select(Biome, Species, Status, clusterRichness) %>%
-  tidyr::pivot_wider(
-    names_from = Status,
-    values_from = clusterRichness
-  ) %>%
-  dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
-  dplyr::mutate(
-    diff = Donor - Receiver,
-    ratio = (Donor - Receiver) / (Donor + Receiver)
-    )
-
-mn <- mean(df_wide_richness$ratio)
-md <- median(df_wide_richness$ratio)
-
-hist(
-  df_wide_richness$ratio,
-  breaks = 30,
-  col = rgb(0, 102/255, 102/255, 0.25),
-  border = "grey50",
-  main = "Richness index (Donor - Receiver) / (Donor + Receiver)"
-  )
-abline(v = mn, col = "forestgreen", lwd = 2, lty = 2)
-abline(v = md, col = "steelblue", lwd = 2, lty = 3)
-legend(
-  "topright",
-  legend = c("Mean", "Median"),
-  col = c("forestgreen", "steelblue"),
-  lty = c(2, 3), lwd = 2
-  )
-
-# Wilcoxon signed-rank test (paired)
-wilcox.test(
-  df_wide_richness$Donor,
-  df_wide_richness$Receiver,
-  paired = TRUE,
-  alternative = "greater"
-)
-
-# Bootstrap effect size (median difference)
-boot_median <- boot::boot(
-  data = df_wide_richness$diff,
-  statistic = function(x, i) median(x[i]),
-  R = 10000
-)
-boot::boot.ci(boot_median, type = "perc")
-
-# Same for cluster ECA
-df_wide_ECA <- df_within %>%
-  dplyr::select(Biome, Species, Status, connectedness) %>%
-  tidyr::pivot_wider(
-    names_from = Status,
-    values_from = connectedness
-  ) %>%
-  dplyr::filter(!is.na(Donor) & !is.na(Receiver)) %>%
-  dplyr::mutate(diff = Donor - Receiver)
-
-# Wilcoxon signed-rank test (paired)
-wilcox.test(
-  df_wide_ECA$Donor,
-  df_wide_ECA$Receiver,
-  paired = TRUE,
-  alternative = "greater"
-)
-
-# Bootstrap effect size (median difference)
-boot_median <- boot::boot(
-  data = df_wide_ECA$diff,
-  statistic = function(x, i) median(x[i]),
-  R = 10000
-)
-boot::boot.ci(boot_median, type = "perc")
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Boxplots of cluster richness of source/sink patch for each species facetted
-# by biome (only entries where source and sink biome are the same type)
-
-## Calculate statistics with log-scale aware positioning
-df_within_bp <- df_within %>%
-  dplyr::mutate(value = clusterRichness) %>%
-  dplyr::filter(BiomeID <= 12) %>%
-  base::droplevels()
-
-metric_max_values <- df_within_bp %>%
-  dplyr::group_by(Biome) %>%
-  dplyr::summarise(
-    max_value = max(value, na.rm = TRUE),
-    log_max_value = log10(max(value, na.rm = TRUE))
-  )
-
-## Wilcoxon test
-test_res <- df_within_bp |>
-  dplyr::group_by(Biome) |>
-  rstatix::wilcox_test(
-    value ~ Status,
-    paired = TRUE,
-    alternative = "greater"
-  ) |>
-  rstatix::adjust_pvalue(method = "BH")
-
-## Effect size
-eff_res <- df_within_bp |>
-  dplyr::group_by(Biome) |>
-  rstatix::wilcox_effsize(
-    value ~ Status,
-    paired = TRUE
-  )
-
-## Create stats dataframe - using log-space coordinates
-stats <- test_res %>%
-  dplyr::left_join(eff_res %>% select(Biome, effsize), by = "Biome") %>%
-  dplyr::left_join(metric_max_values, by = "Biome") %>%
-  dplyr::mutate(
-    label = paste0(
-      "W = ", statistic,
-      "\n", "p = ", signif(p, 3),
-      "\n", "effect size = ", round(effsize, 2),
-      "\nN = ", n1
-    ),
-    y.position = max_value,
-    .y. = "value"
-  ) %>%
-  dplyr::select(
-    Biome, group1, group2, statistic, p, effsize, label, y.position, .y.
-  ) %>%
-  tidyr::pivot_longer(
-    cols = c(group1, group2),
-    names_to = "Group",
-    values_to = "Status"
-  ) %>%
-  dplyr::mutate(value = y.position)
-
-## Simple boxplots by Status (facetted by metric)
-gg_cluster_by_biome <- ggplot2::ggplot(
-  data = df_within_bp,
-  ggplot2::aes(x = Status, y = value, fill = Status)
-  ) +
-  ggplot2::geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
-  ggplot2::facet_wrap(
-    .~ Biome, scales = "free_y"
-  ) +
-  ggplot2::scale_fill_manual(
-    values = c("Donor" = "#2E86AB", "Receiver" = "#A23B72")
-  ) +
-  ggplot2::coord_transform(y = "log10") +
-  ggplot2::labs(
-    title = NULL,
-    y = "Maximum species richness of the biome patch cluster", # expression("Area (" * 10^3 * " km"^2 * ")"),
-    x = "Biome patch cluster status"
-  ) +
-  ggplot2::theme_bw() +
-  ggplot2::theme(
-    legend.position = "none",
-    strip.background = ggplot2::element_rect(fill = "lightgray"),
-    strip.text = ggplot2::element_text(face = "bold", size = 10),
-    panel.grid.minor = ggplot2::element_blank()
-  ) +
-  ggplot2::geom_text(
-    data = stats,
-    ggplot2::aes(x = 1.5, label = label),
-    vjust = 3
-  ) +
-  ggplot2::scale_y_continuous(
-    breaks = c(1e-2, 1, 1e2, 1e4),
-    labels = scales::label_scientific(),
-    sec.axis = sec_axis(
-      ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
-    )
-  )

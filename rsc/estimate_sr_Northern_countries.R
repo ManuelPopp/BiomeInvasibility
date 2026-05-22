@@ -432,3 +432,133 @@ ggplot2::ggsave(
   width = 10,
   height = 7
 )
+
+
+#-------------------------------------------------------------------------------
+# Test correction in log-log space
+
+get_sampling_intensity <- function(country_id) {
+  sub_tab <- freq_tab[freq_tab$countryID == country_id, ]
+  
+  if (nrow(sub_tab) == 0) {
+    return(
+      data.frame(
+        ID = country_id,
+        Count = 0
+      )
+    )
+  }
+  
+  # Based on total observation counts
+  obs_count <- sub_tab %>%
+    dplyr::summarise(counts = sum(freq)) %>%
+    dplyr::pull(counts)
+  
+  return(
+    data.frame(
+      ID = country_id,
+      Count = obs_count
+    )
+  )
+}
+
+results_df2 <- do.call(
+  rbind,
+  lapply(
+    X = country_ids_unique,
+    FUN = function(id) {
+      tryCatch(
+        get_sampling_intensity(id),
+        error = function(e) {
+          stop(paste("Error in country ID", id, ":", e$message))
+        }
+      )
+    }
+  )
+)
+
+spec_richness2 <- terra::merge(
+  spec_richness, results_df2, by = "ID", all.x = TRUE
+)
+
+df_sr <- spec_richness2 %>%
+  as.data.frame() %>%
+  dplyr::mutate(
+    log_SpeciesRichness = log(speciesRichnessBa),
+    log_sampling_effort = log(Count)
+  )
+
+m1 <- mgcv::gam(
+  log_SpeciesRichness ~ s(log_sampling_effort, k = 3),
+  data = df_sr
+)
+mgcv::gam.check(m1)
+
+effort_fit <- stats::predict(m1)
+max_sampling_effect <- stats::predict(
+  m1,
+  newdata = df_sr %>%
+    dplyr::slice_min(
+      abs(
+        log_sampling_effort - quantile(log_sampling_effort, 0.90, na.rm = TRUE)
+      ),
+      n = 1
+    )
+)
+df_sr$logCorrectedSR <- NA
+df_sr$logCorrectedSR[which(df_sr$log_SpeciesRichness > log(100))] <- data.frame(
+  modelled = df_sr$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
+  estimated = df_sr$log_SpeciesRichness
+) %>%
+  dplyr::mutate(
+    maximum = pmax(modelled, estimated, na.rm = TRUE)
+  ) %>%
+  dplyr::pull(maximum)
+
+df_sr$Estimate <- exp(df_sr$logCorrectedSR)
+
+# Test correlation
+corr <- lm(Estimate ~ GIFT, data = df_sr)
+summary(corr)
+res <- residuals(corr)
+df_sr$residuals <- res
+nortest::ad.test(res)
+cor(df_sr$Estimate, df_sr$GIFT, method = "spearman")
+
+resmod <- lm(abs(residuals) ~ GIFT, data = df_sr)
+summary(resmod)
+
+r2_tab_ctnt2 <- df_sr %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(GIFT), !is.na(Estimate), !is.na(Continent)) %>%
+  dplyr::group_by(Continent) %>%
+  dplyr::summarise(
+    r2 = summary(lm(Estimate ~ GIFT))$r.squared,
+    .groups = "drop"
+  )
+
+spearman_tab_ctnt2 <- df_sr %>%
+  as.data.frame() %>%
+  dplyr::filter(!is.na(GIFT), !is.na(Estimate), !is.na(Continent)) %>%
+  dplyr::group_by(Continent) %>%
+  dplyr::summarise(
+    rho = cor(GIFT, Estimate, method = "spearman"),
+    .groups = "drop"
+  )
+
+gg <- ggplot2::ggplot(
+  df_sr,
+  ggplot2::aes(x = GIFT, y = Estimate, colour = Continent)
+) +
+  ggplot2::geom_point(alpha = 0.6) +
+  ggplot2::geom_abline(slope = 1, intercept = 0, linetype = "dashed") +
+  ggplot2::geom_smooth(
+    method = "lm", se = FALSE, colour = rgb(0, 102, 102, maxColorValue = 255)
+  ) +
+  ggplot2::facet_wrap(~ "Corrected", scales = "fixed") +
+  ggplot2::coord_fixed(ratio = 1) +
+  ggplot2::theme_bw() +
+  ggplot2::labs(
+    x = "GIFT species richness",
+    y = "Estimated species richness"
+  )
