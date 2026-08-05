@@ -9,6 +9,8 @@
 #<=============================================================================>
 
 print(Sys.time())
+library("stringr")
+library("boot")
 library("rsdd")
 library("ggplot2")
 library("patchwork")
@@ -23,6 +25,7 @@ library("mgcv")
 library("glmmTMB")
 library("boot")
 #library("coin")
+library("lmodel2")
 library("rstatix")
 library("performance")
 library("MuMIn") # Alternative to performance
@@ -59,7 +62,7 @@ biome_names <- c(
   "Rock and Ice"
 )
 
-nativeness_source <- "sinas"
+nativeness_source <- "sinas" # "powo"
 biome_def <- "olson"
 
 # Main directories
@@ -76,6 +79,7 @@ dir_stats <- file.path(dir_main, "stats")
 dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")  # Only biome-level data
 dir_imed <- file.path(dir_imeb, nativeness_source)  # Patch-level data
 dir_fig <- file.path(dir_main, "fig", nativeness_source)
+dir_tab <- "C:/Users/poppman/Dropbox/Apps/Overleaf/BiomeInvasibility/tab"
 
 if (!dir.exists(dir_fig)) {
   dir.create(dir_fig, recursive = TRUE)
@@ -89,6 +93,10 @@ f_sinas_taxon_match <- file.path(dir_dat, "sinas", "taxonomy_matching.csv")
 f_glonaf_places <- file.path(dir_dat, "glonaf", "glonaf_2024_regions", "glonaf_2024_regions.shp")
 f_glonaf_data <- file.path(dir_dat, "glonaf", "glonaf_flora2.csv")
 f_glonaf_taxa <- file.path(dir_dat, "glonaf", "glonaf_taxon_wcvp.csv")
+
+f_powo_places <- file.path(dir_dat, "powo", "tdwg_level3.geojson")
+f_powo_taxa <- file.path(dir_dat, "powo", "wcvp_names.csv")
+f_powo_taxa_dist <- file.path(dir_dat, "powo", "wcvp_distribution.csv")
 
 # Original biomes file
 f_biomes <- file.path(dir_dat, "biomes", biome_def, "biomes.shp")
@@ -123,6 +131,14 @@ f_spl_eft <- file.path( # Total GBIF observation counts
 
 f_hum_mod <- file.path(
   dir_imeb, "human_modification.csv"
+)
+
+f_road_dns <- file.path(
+  dir_imeb, "road_density.csv"
+)
+
+f_gdp <- file.path(
+  dir_imeb, "gdp_1990to2020.csv"
 )
 
 f_climate_overlap <- file.path(dir_imeb, "climate_overlap.csv")
@@ -298,6 +314,66 @@ sinas_status <- function(taxon, sinas_loc_ids, sinas_data) {
     )
   )
   return(out)
+}
+
+
+boot_conf_int <- function(sdf, frml, fam, coef_names) {
+  mod <- stats::glm(
+    frml,
+    family = fam,
+    data = sdf
+  )
+  
+  estimates <- stats::coef(mod)
+  coef_names <- names(estimates)
+  
+  boot_coef <- function(dat, indices) {
+    d <- dat[indices, ]
+    stats::coef(
+      stats::glm(
+        frml,
+        family = fam,
+        data = d
+      )
+    )
+  }
+  
+  boot_res <- boot::boot(
+    data = sdf,
+    statistic = boot_coef,
+    R = 1000
+  )
+  
+  boot_mat <- boot_res$t
+  
+  sign_stability <- sapply(
+    seq_along(estimates),
+    function(i) {
+      mean(
+        sign(boot_mat[, i]) == sign(estimates[i]),
+        na.rm = TRUE
+      )
+    }
+  )
+  
+  data.frame(
+    predictor = coef_names,
+    estimate = estimates,
+    
+    ci90_low  = apply(boot_mat, 2, quantile, probs = 0.05,  na.rm = TRUE),
+    ci90_high = apply(boot_mat, 2, quantile, probs = 0.95,  na.rm = TRUE),
+    
+    ci95_low  = apply(boot_mat, 2, quantile, probs = 0.025, na.rm = TRUE),
+    ci95_high = apply(boot_mat, 2, quantile, probs = 0.975, na.rm = TRUE),
+    
+    ci99_low  = apply(boot_mat, 2, quantile, probs = 0.005, na.rm = TRUE),
+    ci99_high = apply(boot_mat, 2, quantile, probs = 0.995, na.rm = TRUE),
+    
+    sign_stability = round(100 * sign_stability, 1),
+    
+    row.names = NULL,
+    check.names = FALSE
+  )
 }
 
 
@@ -508,11 +584,18 @@ if (!"dECA" %in% names(biomes) | recompute) {
       )
 }
 
+if (!"gift_nat_centroid" %in% names(biomes) | recompute) {
+  system(paste("Rscript get_GIFT_SR.R", nativeness_source, biome_def))
+  biomes <- terra::vect(f_bfullinfo)
+}
+
 #>-----------------------------------------------------------------------------<
 #> Add species richness estimates, climate stability, sampling effort, etc
 est_div <- read.csv(f_est_div)
 spl_eff <- read.csv(f_spl_eft)
 hum_mod <- read.csv(f_hum_mod)
+road_dns <- read.csv(f_road_dns)
+gdp <- read.csv(f_gdp)
 
 clim_stab <- read.csv(f_climate_overlap) %>%
   dplyr::rename(
@@ -542,6 +625,8 @@ biomes <- terra::vect(f_bfullinfo) %>%
   terra::merge(est_div, by = "ID", all.x = TRUE) %>%
   terra::merge(spl_eff, by = "ID", all.x = TRUE) %>%
   terra::merge(hum_mod, by = "ID", all.x = TRUE) %>%
+  terra::merge(road_dns, by = "ID", all.x = TRUE) %>%
+  terra::merge(gdp, by = "ID", all.x = TRUE) %>%
   terra::merge(clim_stab, by = "ID", all.x = TRUE) %>%
   terra::merge(clim_rest, by = "ID", all.x = TRUE) %>%
   dplyr::mutate(
@@ -551,6 +636,7 @@ biomes <- terra::vect(f_bfullinfo) %>%
     log_sampling_effort = log(sampling_effort),
     biome_name = biome_names[as.numeric(BIOME)]
   )
+
 
 #>-----------------------------------------------------------------------------<
 #> Correct species richness estimates for sampling bias
@@ -577,6 +663,7 @@ max_sampling_effect <- stats::predict(
       n = 1
     )
 )
+
 biomes$logCorrectedSR <- NA
 biomes$logCorrectedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.frame(
   corrected = df_fit$log_SpeciesRichness - effort_fit + max_sampling_effect[1],
@@ -611,8 +698,89 @@ biomes$logCorrectedSR[which(biomes$log_SpeciesRichness > log(100))] <- data.fram
   ) %>%
   dplyr::pull(use_value)
 
+
 #>-----------------------------------------------------------------------------<
 #> Plot species richness estimates
+
+gg_sr_df <- as.data.frame(biomes) |>
+  dplyr::mutate(
+    logSpeciesRichnessBa = log(speciesRichnessBa),
+    logGIFTcentroid = log(gift_nat_centroid),
+    logGIFTcovered = log(gift_nat_covered)
+  ) |>
+  dplyr::select(
+    ID,
+    logSpeciesRichnessBa,
+    logCorrectedSR,
+    logGIFTcentroid,
+    logGIFTcovered
+    ) |>
+  dplyr::select(-ID) |>
+  dplyr::mutate(
+    dplyr::across(
+      dplyr::everything(),
+      ~ replace(.x, !is.finite(.x), NA_real_)
+    )
+  )
+
+var_labels <- c(
+  logSpeciesRichnessBa = "Breakaway (log)",
+  logCorrectedSR = "Corrected Breakaway (log)",
+  logGIFTcentroid = "GIFT centroid-based (log)",
+  logGIFTcovered = "GIFT fully covered (log)"
+)
+
+panel_fun <- function(data, mapping, ...) {
+  x <- GGally::eval_data_col(data, mapping$x)
+  y <- GGally::eval_data_col(data, mapping$y)
+  ok <- is.finite(x) & is.finite(y)
+  x <- x[ok]
+  y <- y[ok]
+  fit <- lmodel2::lmodel2(
+    y ~ x,
+    data = data.frame(x = x, y = y),
+    nperm = 0
+  )
+  ma <- fit$regression.results[
+    fit$regression.results$Method == "MA",
+  ]
+  slope <- ma$Slope
+  intercept <- ma$Intercept
+  
+  grid <- seq(min(x), max(x), length.out = 100)
+  ggplot2::ggplot(data = data, mapping = mapping) +
+    ggplot2::geom_point(colour = rgb(0, 102/255, 102/255, 0.5), size = 1) +
+    ggplot2::geom_abline(
+      slope = slope,
+      intercept = intercept,
+      colour = "royalblue4"
+    ) +
+    ggplot2::geom_abline(
+      slope = 1, intercept = 0,
+      linetype = "dashed", colour = "grey40"
+    )
+}
+
+gg_sr_comp <- GGally::ggpairs(
+  gg_sr_df,
+  upper = list(continuous = "cor"),
+  lower = list(continuous = panel_fun),
+  labeller = ggplot2::as_labeller(var_labels)
+) +
+  ggplot2::theme_bw()
+
+ggplot2::ggsave(
+  filename = file.path(dir_fig, "SR_estimate_comparison.svg"),
+  plot = gg_sr_comp, width = 7, height = 7
+  )
+
+cat(
+  "\nBreakaway:", length(which(is.finite(gg_sr_df$logSpeciesRichnessBa))),
+  "\nBreakaway corrected:", length(which(is.finite(gg_sr_df$logCorrectedSR))),
+  "\nGIFT centroid:", length(which(is.finite(gg_sr_df$logGIFTcentroid))),
+  "\nGIFT covered:", length(which(is.finite(gg_sr_df$logGIFTcovered)))
+)
+
 
 for (i in 1:2) {
   if (i == 1) {
@@ -652,6 +820,7 @@ for (i in 1:2) {
   )
   dev.off()
 }
+
 
 #>-----------------------------------------------------------------------------<
 #> Assign species to biome patches
@@ -1207,7 +1376,7 @@ polygons_sf <- sf::st_as_sf(remerge)
 gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
   ggplot2::geom_sf(ggplot2::aes(fill = species_count)) +
-  ggplot2::facet_wrap(~ Status, ncol = 2) +
+  ggplot2::facet_wrap(~ Status, nrow = 2) +
   ggplot2::scale_fill_viridis_c(
     name = "Species count",
     option = "viridis",
@@ -1223,15 +1392,24 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
 ggplot2::ggsave(
   filename = file.path(dir_fig, "SInAS_donors_and_receivers.png"),
   plot = gg_dr,
-  width = 13, height = 3
+  width = 7, height = 6 # 13 and 3 for two-column version
   )
 
 
 #-------------------------------------------------------------------------------
 # Plot boxplots
+metrics <- c(
+  "max_lowland_1e3km2",
+  "max_focalECA",
+  #"max_richness",
+  #"max_grichness",
+  "max_crichness"
+)
+
 boxplot_data <- merged %>%
   dplyr::select(
-    Species, Status, lowland_area_km2, speciesRichnessBa, focalECA
+    Species, Status, lowland_area_km2, speciesRichnessBa, focalECA,
+    logCorrectedSR, gift_nat_centroid
   ) %>%
   dplyr::group_by(Species, Status) %>%
   dplyr::summarise(
@@ -1244,6 +1422,16 @@ boxplot_data <- merged %>%
       all(is.na(speciesRichnessBa))
     ) NA else max(
       speciesRichnessBa, na.rm = TRUE
+    ),
+    max_crichness = if(
+      all(is.na(exp(logCorrectedSR)))
+    ) NA else max(
+      logCorrectedSR, na.rm = TRUE
+    ),
+    max_grichness = if(
+      all(is.na(gift_nat_centroid))
+    ) NA else max(
+      gift_nat_centroid, na.rm = TRUE
     ),
     max_focalECA_m2 = if(
       all(is.na(focalECA))
@@ -1260,7 +1448,11 @@ boxplot_data <- merged %>%
   dplyr::filter(n() == 2) %>%
   dplyr::ungroup() %>%
   tidyr::pivot_longer(
-    cols = c(max_lowland_1e3km2, max_richness, max_focalECA),
+    cols = c(
+      max_lowland_1e3km2,
+      max_richness, max_crichness, max_grichness,
+      max_focalECA
+      ),
     names_to = "metric",
     values_to = "value"
   ) %>%
@@ -1271,7 +1463,11 @@ boxplot_data <- merged %>%
   dplyr::filter(
     all(c("Donor", "Receiver") %in% Status)
   ) %>%
-  dplyr::ungroup()
+  dplyr::ungroup() %>%
+  dplyr::filter(metric %in% metrics) %>%
+  dplyr::mutate(
+    metric = factor(metric)
+  )
 
 # Calculate statistics
 ## Calculate statistics with log-scale aware positioning
@@ -1280,7 +1476,11 @@ metric_max_values <- boxplot_data %>%
   dplyr::summarise(
     max_value = max(value, na.rm = TRUE),
     log_max_value = log10(max(value, na.rm = TRUE)),
-    place_low = median(value, na.rm = TRUE) < (max(value, na.rm = TRUE) / 2)
+    place_low = median(log10(value), na.rm = TRUE) > (
+      max(log10(value), na.rm = TRUE) - (
+        max(log10(value), na.rm = TRUE) - min(log10(value), na.rm = TRUE)
+        ) / 2
+      )
   )
 
 ## Wilcoxon test
@@ -1289,7 +1489,8 @@ test_res <- boxplot_data |>
   rstatix::wilcox_test(
     value ~ Status,
     paired = TRUE,
-    alternative = "greater"
+    alternative = "greater",
+    p.adjust.method = "BH"
   ) |>
   rstatix::adjust_pvalue(method = "BH")
 
@@ -1308,8 +1509,8 @@ stats <- test_res %>%
   dplyr::mutate(
     label = paste0(
       "W = ", statistic,
-      "\n", "p = ", signif(p, 3),
-      "\n", "effect size = ", round(effsize, 2)
+      "\n", "p = ", signif(p.adj, 3),
+      "\n", "effect size = ", sprintf("%.2f", effsize)
     ),
     y.position = max_value,
     .y. = "value"
@@ -1328,16 +1529,28 @@ stats <- test_res %>%
     place_low = place_low
     )
 
+# Results
+# Metric  p-value     effectsize Test stat (W) N
+# SR      5.24e-118   0.232      13345744      10529
+# C. SR   1.34e-228   0.302      15143531      10523
+# GIFT SR 2.63e-118   0.220      11311265      10383
+# ECA     7.65e-240   0.330      19587786      10529
+# Area    1.86e- 16   0.106      15901928      10510
+
 ## Simple boxplots by Status (facetted by metric)
-gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Status)) +
+gg_area <- ggplot2::ggplot(
+  boxplot_data,
+  ggplot2::aes(x = Status, y = value, fill = Status)
+  ) +
   ggplot2::geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
   ggplot2::facet_wrap(
-    ~ metric, scales = "free_y",
+    ~ metric, scales = "free_y", nrow = 1,
     labeller = as_labeller(
       c(
         "max_lowland_1e3km2" = "Maximum Lowland Area",
         "max_richness" = "Maximum Species Richness",
-        "max_focalECA" = "Maximum Connected Area"
+        "max_focalECA" = "Maximum Connected Area",
+        "max_crichness" = "Maximum Species Richness"
       )
     )
   ) +
@@ -1349,7 +1562,7 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   ggplot2::coord_transform(y = "log10") +
   ggplot2::labs(
     title = NULL,
-    y = expression("Area (" * 10^3 * " km"^2 * ")"),
+    y = expression("Area in " * 10^3 * " km"^2 * " or estimated number or species"),
     x = "Biome patch status"
   ) +
   ggplot2::theme_bw() +
@@ -1362,21 +1575,21 @@ gg_area <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = Statu
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(
-      x = 1.5, label = label, vjust = ifelse(place_low, 4.5, 2)
+      x = 1.5, label = label, vjust = ifelse(place_low, 4.5, 1.5)
       )
     ) +
   ggplot2::scale_y_continuous(
-    breaks = c(1e-2, 1, 1e2, 1e4),
-    labels = scales::label_scientific(),
-    sec.axis = sec_axis(
-      ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
-      )
+    breaks = scales::breaks_log(n = 5),
+    labels = scales::label_scientific()#,
+    # sec.axis = sec_axis(
+    #   ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
+    #   )
   )
 
 ggplot2::ggsave(
   filename = file.path(dir_fig, "MaxAreaRichnessBoxplot.svg"),
   plot = gg_area,
-  width = 10, height = 4
+  width = 3.3 * length(metrics), height = 4
 )
 
 
@@ -1389,6 +1602,33 @@ f_splotdata <- file.path(dir_imed, "splot.RData")
 if (file.exists(f_splotdata)) {
   load(f_splotdata)
 } else {
+  if (nativeness_source == "sinas") {
+    listed_taxa  <- unique(sinas_data$taxon)
+  } else if (nativeness_source == "powo") {
+    taxa <- data.table::fread(f_powo_taxa, header = TRUE, sep = "|") %>%
+      dplyr::select(
+        plant_name_id, species, taxon_name, taxon_rank, taxon_status,
+        accepted_plant_name_id
+      )
+    locs <- data.table::fread(f_powo_taxa_dist, header = TRUE, sep = "|") %>%
+      dplyr::select(
+        plant_name_id, area_code_l3, introduced, extinct, location_doubtful
+      )
+    powo <- dplyr::left_join(
+      locs,
+      dplyr::filter(taxa, taxon_status == "Accepted"),
+      by = "plant_name_id"
+      ) %>%
+      dplyr::filter(
+        taxon_rank %in% c("Species", "Subspecies")
+      ) %>%
+      dplyr::mutate(
+        locationCode = factor(area_code_l3),
+        locationID = as.numeric(locationCode)
+      )
+    listed_taxa <- unique(powo$taxon_name)
+  }
+  
   e <- new.env()
   load(f_sPlot, envir = e)
   sPlot <- as.list(e)
@@ -1427,11 +1667,86 @@ if (file.exists(f_splotdata)) {
     dplyr::mutate(
       Taxon_group = factor(Taxon_group),
       Cover_scale = factor(Cover_scale),
-      Invader = Species %in% unique(sinas_data$taxon)
+      Invader = Species %in% listed_taxa
     )
   
   rm(sPlot)
   gc()
+  
+  if (nativeness_source == "powo") {
+    sPlotSpecies <- sPlotData %>%
+      dplyr::mutate(
+        Species = stringr::str_replace(
+          Species,
+          "^([A-Z][a-z-]+) ([a-z-]+) subsp\\. \\2$",
+          "\\1 \\2"
+        )
+      ) %>%
+      dplyr::group_by(Species) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup() %>%
+      dplyr::left_join(
+        dplyr::filter(taxa, taxon_status == "Accepted"),
+        by = c("Species" = "taxon_name")
+      )
+    
+    accepted_taxa <- taxa %>%
+      dplyr::filter(taxon_status == "Accepted") %>%
+      dplyr::select(
+        plant_name_id,
+        taxon_name
+      )
+    
+    synonyms <- sPlotSpecies %>%
+      dplyr::filter(is.na(plant_name_id)) %>%
+      dplyr::select(Species) %>%
+      dplyr::left_join(
+        dplyr::filter(taxa, taxon_status == "Synonym") %>%
+          dplyr::select(
+            taxon_name,
+            accepted_plant_name_id
+          ),
+        by = c("Species" = "taxon_name")
+      ) %>%
+      dplyr::left_join(
+        accepted_taxa,
+        by = c("accepted_plant_name_id" = "plant_name_id")
+      ) %>%
+      dplyr::transmute(
+        Species,
+        plant_name_id = accepted_plant_name_id,
+        taxon_name
+      ) %>%
+      dplyr::group_by(Species) %>%
+      dplyr::slice(1) %>%
+      dplyr::ungroup()
+    
+    sPlotSpecies <- sPlotSpecies %>%
+      dplyr::filter(!is.na(plant_name_id)) %>%
+      dplyr::transmute(
+        Species,
+        plant_name_id,
+        taxon_name = Species
+      ) %>%
+      dplyr::select(Species, plant_name_id, taxon_name) %>%
+      dplyr::bind_rows(synonyms) %>%
+      dplyr::distinct(Species, .keep_all = TRUE) %>%
+      dplyr::rename(
+        Species_sPlot = Species,
+        Species = taxon_name
+      )
+    
+    sPlotData <- sPlotData %>%
+      dplyr::rename(Species_sPlot = Species) %>%
+      dplyr::mutate(
+        Species_sPlot = stringr::str_replace(
+          Species_sPlot,
+          "^([A-Z][a-z-]+) ([a-z-]+) subsp\\. \\2$",
+          "\\1 \\2"
+        )
+      ) %>%
+      dplyr::left_join(sPlotSpecies, by = "Species_sPlot")
+  }
   
   # Get SINaS location ID for each sPlot plot
   # Check if sinas_places contains multiple levels (e.g. continents + countries)
@@ -1448,13 +1763,29 @@ if (file.exists(f_splotdata)) {
     dplyr::select(PlotObservationID, Longitude, Latitude) %>%
     terra::vect(geom = c("Longitude", "Latitude"), crs = "epsg:4326")
   
-  # Rasterise SINaS places for faster value extraction
-  r_loc <- terra::rasterize(
-    sinas_places,
-    terra::rast(f_envstack, lyrs = 1),
-    field = "locationID",
-    touches = TRUE
-  )
+  # Rasterise places for faster value extraction
+  if (nativeness_source == "sinas") {
+    r_loc <- terra::rasterize(
+      sinas_places,
+      terra::rast(f_envstack, lyrs = 1),
+      field = "locationID",
+      touches = TRUE
+    )
+  } else if (nativeness_source == "powo") {
+    powo_places <- terra::vect(f_powo_places) %>%
+      dplyr::mutate(
+        locationCode = factor(LEVEL3_COD),
+        locationID = as.numeric(locationCode)
+        ) %>%
+      dplyr::select(locationCode, locationID)
+    
+    r_loc <- terra::rasterize(
+      powo_places,
+      terra::rast(f_envstack, lyrs = 1),
+      field = "locationID",
+      touches = TRUE
+    )
+  }
   
   # Extract SINaS location IDs
   loc_ids <- terra::extract(r_loc, plot_locs) %>%
@@ -1472,19 +1803,34 @@ if (file.exists(f_splotdata)) {
   sPlotData$Status <- NA_character_
   
   # Create look-up tables for native/introduced location IDs
-  invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
-  sinas_small <- sinas_data %>%
-    dplyr::filter(taxon %in% invader_species) %>%
-    dplyr::select(taxon, locationID, establishmentMeans)
+  if (nativeness_source == "sinas") {
+    invader_species <- unique(sPlotData$Species[which(sPlotData$Invader)])
+    taxa_small <- sinas_data %>%
+      dplyr::filter(taxon %in% invader_species) %>%
+      dplyr::select(taxon, locationID, establishmentMeans)
+  } else if (nativeness_source == "powo") {
+    invader_species <- unique(
+      sPlotData$Species[which(!is.na(sPlotData$plant_name_id))]
+      )
+    taxa_small <- powo %>%
+      dplyr::filter(taxon_name %in% invader_species) %>%
+      dplyr::mutate(
+        taxon = taxon_name,
+        establishmentMeans = ifelse(
+          introduced == 1, "introduced", "native"
+        )
+      ) %>%
+      dplyr::select(taxon, locationID, establishmentMeans)
+  }
   
   native_map <- split(
-    sinas_small$locationID[sinas_small$establishmentMeans == "native"],
-    sinas_small$taxon[sinas_small$establishmentMeans == "native"]
+    taxa_small$locationID[taxa_small$establishmentMeans == "native"],
+    taxa_small$taxon[taxa_small$establishmentMeans == "native"]
   )
   
   intro_map <- split(
-    sinas_small$locationID[sinas_small$establishmentMeans == "introduced"],
-    sinas_small$taxon[sinas_small$establishmentMeans == "introduced"]
+    taxa_small$locationID[taxa_small$establishmentMeans == "introduced"],
+    taxa_small$taxon[taxa_small$establishmentMeans == "introduced"]
   )
   
   native_map <- setNames(
@@ -1779,10 +2125,12 @@ frml <- make_formula(
   biome = FALSE
   )
 
-if(!dir.exists(file.path(dir_fig, "sPlotResponse"))) {
-  dir.create(file.path(dir_fig, "sPlotResponse"))
-}
-for (bi in names(bi_tab[bi_tab >= 15])) {
+# if(!dir.exists(file.path(dir_fig, "sPlotResponse"))) {
+#   dir.create(file.path(dir_fig, "sPlotResponse"), recursive = TRUE)
+# }
+subtables_tex = character(0)
+binames <- names(bi_tab[bi_tab >= 15])
+for (bi in binames) {
   biname_clean <- gsub("[^[:alpha:]]", "", bi, perl = TRUE)
   
   sdf <- df_sPlotBiome %>%
@@ -1798,11 +2146,13 @@ for (bi in names(bi_tab[bi_tab >= 15])) {
   sdf$Introduced_abundance_logit_boundary_corrected <- qlogis(
     (sdf$Introduced_abundance * (n - 1) + 0.5) / n
   )
-  mod_full <- glm(
+  mod_full <- stats::glm(
     frml,
     family = fam,
     data = sdf
   )
+  
+  ci <- boot_conf_int(sdf = sdf, frml = frml, fam = fam)
   
   d2_adj_full <- ecospat::ecospat.adj.D2.glm(mod_full)
   cat("\n\n", bi, "D2:", d2_adj_full, "(GLM)\n")
@@ -1838,10 +2188,9 @@ for (bi in names(bi_tab[bi_tab >= 15])) {
       )
   }
   
-  df_vars <- coefs[-1, ] %>%
-    as.data.frame() %>%
-    dplyr::mutate(
-      Variable = row.names(.)
+  df_vars <- ci %>%
+    dplyr::rename(
+      Variable = predictor
     ) %>%
     dplyr::left_join(
       do.call(rbind, df_list_vars),
@@ -1850,7 +2199,67 @@ for (bi in names(bi_tab[bi_tab >= 15])) {
     dplyr::relocate(Variable)
   
   print(df_vars)
+  
+  df_out <- df_vars %>%
+    dplyr::filter(Variable != "(Intercept)") %>%
+    dplyr::mutate(
+      Variable = dplyr::recode(
+        Variable,
+        "log_focalECA" = "Connected area",
+        "HumanModification" = "Human modification",
+        "climateVelocityRank" = "Climate velocity"
+      ),
+      estimate_ci = sprintf(
+        "%.2f [%.2f, %.2f]",
+        estimate,
+        ci95_low,
+        ci95_high
+      ),
+      sign_stability = sprintf("%.1f", sign_stability),
+      p_Chisq = sprintf("%.3f", p_Chisq),
+      delta_aic = sprintf("%.2f", delta_aic)
+    ) %>%
+    dplyr::select(
+      Variable,
+      estimate_ci,
+      sign_stability,
+      p_Chisq,
+      delta_aic
+    )
+  
+  
+  rows <- apply(
+    df_out,
+    1,
+    function(x) paste(x, collapse = " & ")
+  )
+  
+  rows <- paste0(rows, " \\\\")
+  
+  subtables_tex <- c(
+    subtables_tex,
+    "\\begin{subtable}[t]{0.95\\textwidth}",
+    "\\centering",
+    sprintf(
+      "\\caption{%s}",
+      paste0(bi, " (\\(D^2\\) = ", sprintf("%.3f", d2_adj_full), ")")
+      ),
+    "\\begin{tabular}{p{4cm}cS[table-format=3.1]S[table-format=1.3]S[table-format=2.2]}",
+    "\\toprule",
+    "{Variable} & {Estimate [95\\% CI]} & {Sign stability (\\%)} & {$p$} & {$\\Delta$AIC} \\\\",
+    "\\midrule",
+    rows,
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\end{subtable}",
+    ifelse(bi != binames[length(binames)], "\\par\\medskip", "")
+  )
 }
+
+writeLines(
+  subtables_tex,
+  file.path(dir_tab, paste("glm", nativeness_source, "subtab.tex", sep = "_"))
+)
 
 
 #>=============================================================================<
@@ -1983,6 +2392,7 @@ if (file.exists(f_invasion)) {
             Status, Invaded,
             total_area_km2, lowland_area_km2, focalECA,
             speciesRichnessBa, sampling_effort, logCorrectedSR,
+            gHM, RoadDensity, gdp1990to2020,
             Bhattacharyya, Bhattacharyya_reason,
             climateStability, climateVelocity
             ) %>%
@@ -2224,13 +2634,15 @@ gg_pie <- ggplot2::ggplot(
   ggplot2::coord_polar("y", start = 0) +
   ggplot2::theme_minimal() +
   ggplot2::theme(
+    legend.position = "bottom",
+    legend.title = ggplot2::element_blank(),
     axis.title.x = ggplot2::element_blank(),
     axis.title.y = ggplot2::element_blank(),
     axis.text.x = ggplot2::element_blank(),
     axis.text.y = ggplot2::element_blank(),
     panel.grid.major = ggplot2::element_blank()
     ) +
-  ggplot2::ggtitle("Explained Deviance") +
+  #ggplot2::ggtitle("Explained Deviance") +
   ggplot2::scale_fill_manual(
     values = c(
       rgb(0, 102/255, 102/255),
@@ -2242,12 +2654,18 @@ gg_pie <- ggplot2::ggplot(
       #"grey25",
       "grey75"
     )
+  ) +
+  ggplot2::guides(
+    fill = ggplot2::guide_legend(
+      ncol = 2,
+      byrow = TRUE
+    )
   )
 
 ggplot2::ggsave(
   filename = file.path(dir_fig, "DevExplPie.svg"),
   plot = gg_pie,
-  width = 5, height = 5
+  width = 5, height = 5.5
   )
 
 
@@ -2257,6 +2675,27 @@ ggplot2::ggsave(
 #
 # Maybe worth a try: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
 #
+stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
+
+response_labeller <- function(x) {
+  is_log <- grepl("^log", x)
+  x <- gsub("^log", "", x)
+  x <- gsub("([a-z])([A-Z])", "\\1 \\2", x)
+  x <- gsub("Conn", "Connected", x)
+  x <- gsub("Rank", "(rank-normalised)", x)
+  x <- trimws(x)
+  x <- paste0(
+    toupper(substr(x, 1, 1)),
+    substr(x, 2, nchar(x))
+  )
+  x <- ifelse(
+    is_log,
+    paste0(x, " (log-scaled)"),
+    x
+  )
+  x
+}
+
 frml_bi <- make_formula(predictors, biome = FALSE)
 dir_plots <- file.path(dir_fig, "invasion_prob_by_biome")
 if(!dir.exists(dir_plots)) {
@@ -2264,7 +2703,6 @@ if(!dir.exists(dir_plots)) {
 }
 plot_list <- list()
 for (bi in sort(unique(df_mod$Biome))) {
-  stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
   w <- subset(df_mod, Biome == bi) %>%
     dplyr::group_by(Species, Invaded) %>%
     dplyr::summarise(
@@ -2301,6 +2739,7 @@ for (bi in sort(unique(df_mod$Biome))) {
   for (p in predictors) {
     adjD2_rand_c <- c()
     for (i in 1:100) {
+      set.seed(i)
       df_rand <- df_bi %>%
         dplyr::mutate(
           "{p}" := sample(.data[[p]])
@@ -2352,7 +2791,7 @@ for (bi in sort(unique(df_mod$Biome))) {
     b <- coef(mod_bi)
     V <- vcov(mod_bi)
     sim_b <- MASS::mvrnorm(n = 2000, mu = b, Sigma = V)
-    fit_sim <- sim_b %*% t(pred)
+    fit_sim <- plogis(sim_b %*% t(pred))
     fit_mean <- colMeans(fit_sim)
     fit_low <- apply(fit_sim, 2, quantile, 0.025)
     fit_high <- apply(fit_sim, 2, quantile, 0.975)
@@ -2396,9 +2835,13 @@ for (bi in sort(unique(df_mod$Biome))) {
         linewidth = 1
       ) +
       ggplot2::labs(
-        title = p,
+        title = response_labeller(p),
         x = NULL,
         y = NULL
+      ) +
+      ggplot2::scale_y_continuous(
+        limits = c(0, 1),
+        expand = c(0, 0)
       ) +
       ggplot2::theme_bw() +
       ggplot2::theme(

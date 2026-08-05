@@ -14,6 +14,14 @@ all_vars <- c(
   "npp"
 )
 
+var_labels <- c(
+  npp = "Net primary productivity",
+  log_total_area = "Total area (log-scaled)",
+  log_Connectedness = "Connected area (log-scaled)",
+  climate_restime_a = "Climate residence time",
+  climate_velocity_kmpa = "Climate velocity"
+)
+
 vars <- c(
   "npp",
   "log_total_area",
@@ -51,8 +59,9 @@ mod_dat <- as.data.frame(biomes) %>%
 
 # Approach 1: Model on corrected estimate
 
-if (!dir.exists(file.path(dir_fig, "species_richness"))) {
-  dir.create(file.path(dir_fig, "species_richness"))
+dir_sr_out <- file.path(dir_fig, "species_richness", resp)
+if (!dir.exists(dir_sr_out)) {
+  dir.create(dir_sr_out, recursive = TRUE)
 }
 
 frml <- make_formula(predictors = vars, response = resp, biome = FALSE)
@@ -87,7 +96,7 @@ for (bi in bis) {
   biname_clean <- gsub("[^[:alpha:]]", "", bi_label, perl = TRUE)
   
   svg(
-    filename = file.path(dir_fig, "species_richness", paste0(biname_clean, "_SR.svg")),
+    filename = file.path(dir_sr_out, paste0(biname_clean, "_SR.svg")),
     width = 7, height = 5
     )
   # ---- compact layout ----
@@ -194,7 +203,7 @@ for (bi in bis) {
       xpd = NA
     )
     
-    mtext(v, side = 1, line = 1.2, cex = 0.8)
+    mtext(var_labels[v], side = 1, line = 1.2, cex = 0.8)
   }
   
   # ---- biome title once per panel ----
