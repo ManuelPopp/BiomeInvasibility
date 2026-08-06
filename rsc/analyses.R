@@ -2285,7 +2285,7 @@ merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
 max_lobBhat <- 1.34
 
 # Create sample data frame
-future::plan(multisession, workers = parallel::detectCores() - 1)
+future::plan(multisession, workers = parallel::detectCores() - 2)
 
 f_invasion <- file.path(dir_imed, "df_invasion.Rsave")
 if (file.exists(f_invasion)) {
@@ -2427,7 +2427,9 @@ if (file.exists(f_invasion)) {
       logSpeciesRichnessBa = log(speciesRichnessBa),
       logRelClimStability = log(relClimStability),
       logRelClimVelocity = log(relClimVelocity),
-      logSamplingEffort = log(sampling_effort)
+      logSamplingEffort = log(sampling_effort),
+      logGDP = log(gdp1990to2020),
+      logRoadDensity = log(RoadDensity)
     ) %>%
     as.data.frame()
   
@@ -2453,7 +2455,10 @@ hist(df_invasion$logCorrectedRichnessRatio, main = "Spechies richness ratio (cor
 hist(df_invasion$logSamplingEffort, main = "Sampling effort (log transformed)")
 hist(df_invasion$logRelClimStability, main = "Relative climate stability (log transformed)")
 hist(df_invasion$logRelClimVelocity, main = "Relative climate velocity (log transformed)")
+hist(df_invasion$logGDP, main = "GDP (log transformed)")
+hist(df_invasion$logRoadDensity, main = "Road density (log transformed)")
 par(mfrow = c(1, 1))
+
 
 # Filter data
 potential_predictors <- c(
