@@ -25,6 +25,7 @@ library("mgcv")
 library("glmmTMB")
 library("boot")
 #library("coin")
+library("fpc")  # For Mahalanobis/Bhattacharyya distances
 library("lmodel2")
 library("rstatix")
 library("performance")
@@ -2285,12 +2286,11 @@ merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
 max_lobBhat <- 1.34
 
 # Create sample data frame
-future::plan(multisession, workers = parallel::detectCores() - 2)
-
 f_invasion <- file.path(dir_imed, "df_invasion.Rsave")
 if (file.exists(f_invasion)) {
   load(f_invasion)
 } else {
+  future::plan(multisession, workers = parallel::detectCores() - 2)
   df_invasion <- dplyr::bind_rows(
     future.apply::future_lapply(
       X = unique(merged_env$Species),
