@@ -29,7 +29,7 @@ dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")
 f_bfullinfo <- file.path(dir_imeb, "biomes_full_info.gpkg")
 f_road_density <- file.path(dir_dat, "grip_road_density", "GRIP4_tp1plus2.tif")
 f_gdp_rst <- file.path(
-  dir_dat, "shp", "gdp_data", "gdp_perCapita_1990_2020_CHELSA.tif"
+  dir_dat, "gdp_data", "gdp_1990to2020_mean.tif"
   )
 
 f_road_dns <- file.path(
@@ -76,4 +76,3 @@ terra::extract(
     file = f_gdp,
     row.names = FALSE
   )
-

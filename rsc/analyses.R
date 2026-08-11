@@ -160,6 +160,7 @@ f_gadm <- file.path(
 )
 
 # Environmental raster data
+# Created in .../PhD/prj/bir/git/BiomeInvasibility/rsc/misc/chelsa_var_correlations.R
 f_envstack <- file.path(
   dir_lud11, "poppman/data/bir/dat/lud11/environment", "environmentPC.tif"
 )
@@ -2459,11 +2460,13 @@ hist(df_invasion$logGDP, main = "GDP (log transformed)")
 hist(df_invasion$logRoadDensity, main = "Road density (log transformed)")
 par(mfrow = c(1, 1))
 
+human_pred <- "logGDP"  # Run script below to find best human predictor
+if (is.na(human_pred)) {source("compare_human_predictors.R")}
 
 # Filter data
 potential_predictors <- c(
   "logConnAreaRatio", "logSpeciesRichnessBa", "logCorrectedRichnessRatio",
-  "climateStability"
+  "climateStability", "logBhattacharyya", human_pred
 )
 
 df_invasion_filtered <- df_invasion[ # Filter out incomplete cases
@@ -2548,14 +2551,44 @@ df_mod <- df_invasion_filtered %>%
     weight = ifelse(Invaded == 1, w, 1),
     )
 
-predictors <- c(
+# Fit environmental model
+predictors_base <- c(
+  "logSamplingEffort",
+  human_pred
+)
+predictors_eco <- c(
   "logCorrectedRichnessRatio",
   "logConnAreaRatio",
   "climateVelocityRank",
-  "logSamplingEffort"
+  "logBhattacharyya"
+)
+predictors <- c(predictors_base, predictors_eco)
+
+frml_base <- make_formula(predictors_base, biome = TRUE)
+frml_full <- make_formula(predictors, biome = TRUE)
+
+# Direct comparison of full model to baseline (background)
+mod_base <- mgcv::gam(
+  frml_base,
+  data = df_mod,
+  method = "ML",
+  family = binomial("logit"),
+  weights = weight
 )
 
-frml_full <- make_formula(predictors, biome = TRUE)
+mod_full <- mgcv::gam(
+  frml_full,
+  data = df_mod,
+  method = "ML",
+  family = binomial("logit"),
+  weights = weight
+)
+
+ecospat::ecospat.adj.D2.glm(mod_base)
+ecospat::ecospat.adj.D2.glm(mod_full)
+anova(mod_base, mod_full, test = "Chisq")
+
+# Deviance partitioning
 mod_gam <- mgcv::gam(
   frml_full,
   data = df_mod,
@@ -2656,6 +2689,7 @@ gg_pie <- ggplot2::ggplot(
       rgb(70/255, 100/255, 170/255),
       "yellow",
       "orange",
+      "blue",
       #"grey25",
       "grey75"
     )
@@ -2672,7 +2706,6 @@ ggplot2::ggsave(
   plot = gg_pie,
   width = 5, height = 5.5
   )
-
 
 # Fit model per biome, estimate explained deviance contributions
 # and plot response shapes
