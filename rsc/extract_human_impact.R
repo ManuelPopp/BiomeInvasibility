@@ -47,12 +47,16 @@ road_density <- terra::rast(f_road_density) %>%
   terra::project("epsg:6933", method = "bilinear")
 names(road_density) <- "RoadDensity"
 
+road_density
+
 gdp <- terra::rast(f_gdp_rst) %>%
-  terra::project("epsg:6933")
+  terra::project("epsg:6933", method = "bilinear")
 names(gdp) <- "gdp1990to2020"
 
+gdp
+
 biomes <- terra::vect(f_bfullinfo) %>%
-  terra::project("epsg:6933", method = "bilinear")
+  terra::project("epsg:6933")
 
 terra::extract(
   road_density,
