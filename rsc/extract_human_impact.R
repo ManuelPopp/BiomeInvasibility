@@ -43,18 +43,21 @@ f_gdp <- file.path(
 #>=============================================================================<
 #> Extract
 #<=============================================================================>
-road_density <- terra::rast(f_road_density)
+road_density <- terra::rast(f_road_density) %>%
+  terra::project("epsg:6933", method = "bilinear")
 names(road_density) <- "RoadDensity"
 
-gdp <- terra::rast(f_gdp_rst)
+gdp <- terra::rast(f_gdp_rst) %>%
+  terra::project("epsg:6933")
 names(gdp) <- "gdp1990to2020"
 
-biomes <- terra::vect(f_bfullinfo)
+biomes <- terra::vect(f_bfullinfo) %>%
+  terra::project("epsg:6933", method = "bilinear")
 
 terra::extract(
   road_density,
   biomes,
-  fun = "mean",
+  fun = mean,
   na.rm = TRUE
 ) %>%
   dplyr::mutate(
@@ -68,7 +71,7 @@ terra::extract(
 terra::extract(
   gdp,
   biomes,
-  fun = "mean",
+  fun = mean,
   na.rm = TRUE
 ) %>%
   dplyr::mutate(
