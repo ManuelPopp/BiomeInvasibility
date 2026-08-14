@@ -2460,12 +2460,12 @@ hist(df_invasion$logGDP, main = "GDP (log transformed)")
 hist(df_invasion$logRoadDensity, main = "Road density (log transformed)")
 par(mfrow = c(1, 1))
 
-human_pred <- "logGDP"  # Run script below to find best human predictor
-if (is.na(human_pred)) {source("compare_human_predictors.R")}
+human_pred <- c("logGDP", "logRoadDensity")  # Run script below to find best human predictor
+if (all(is.na(human_pred))) {source("compare_human_predictors.R")}
 
 # Filter data
 potential_predictors <- c(
-  "logConnAreaRatio", "logSpeciesRichnessBa", "logCorrectedRichnessRatio",
+  "logConnAreaRatio", "logAreaRatio", "logCorrectedRichnessRatio",
   "climateStability", "logBhattacharyya", human_pred
 )
 
@@ -2554,18 +2554,25 @@ df_mod <- df_invasion_filtered %>%
 # Fit environmental model
 predictors_base <- c(
   "logSamplingEffort",
-  human_pred
-)
-predictors_eco <- c(
-  "logCorrectedRichnessRatio",
-  "logConnAreaRatio",
-  "climateVelocityRank",
+  human_pred,
   "logBhattacharyya"
 )
-predictors <- c(predictors_base, predictors_eco)
+predictors_hypothesis <- c(
+  "logCorrectedRichnessRatio",
+  "logConnAreaRatio",
+  "climateVelocityRank"
+)
+predictors_hypothesis_check <- c( # To test whether area is not some sampling artifact
+  "logCorrectedRichnessRatio",
+  "logAreaRatio",
+  "climateVelocityRank"
+)
+predictors <- c(predictors_base, predictors_hypothesis)
+predictors_check <- c(predictors_base, predictors_hypothesis_check)
 
 frml_base <- make_formula(predictors_base, biome = TRUE)
 frml_full <- make_formula(predictors, biome = TRUE)
+frml_full_check <- make_formula(predictors_check, biome = TRUE)
 
 # Direct comparison of full model to baseline (background)
 mod_base <- mgcv::gam(
@@ -2584,12 +2591,30 @@ mod_full <- mgcv::gam(
   weights = weight
 )
 
+mod_full_check <- mgcv::gam(
+  frml_full_check,
+  data = df_mod,
+  method = "ML",
+  family = binomial("logit"),
+  weights = weight
+)
+
 ecospat::ecospat.adj.D2.glm(mod_base)
 ecospat::ecospat.adj.D2.glm(mod_full)
+ecospat::ecospat.adj.D2.glm(mod_full_check)
 anova(mod_base, mod_full, test = "Chisq")
+anova(mod_full, mod_full_check, test = "Chisq") # Here, again, we see that connected area is better than just area
 
-# Deviance partitioning
-mod_gam <- mgcv::gam(
+# Deviance "partitioning"
+df_mod %>%
+  dplyr::select(dplyr::all_of(predictors)) %>%
+  stats::cor(use = "pairwise.complete.obs") %>%
+  corrplot::corrplot(
+    method = "color", type = "upper", tl.col = "black", order = "hclust",
+    col = RColorBrewer::brewer.pal(n = 8, name = "RdBu")
+    )
+
+mod_full_reml <- mgcv::gam(
   frml_full,
   data = df_mod,
   method = "REML",
@@ -2597,11 +2622,65 @@ mod_gam <- mgcv::gam(
   weights = weight
 )
 
-summary(mod_gam)
-adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_gam)
+summary(mod_full_reml)
+adjD2_full <- ecospat::ecospat.adj.D2.glm(mod_full_reml)
 
-mgcv::gam.check(mod_gam)
-mgcv::concurvity(mod_gam)
+mgcv::gam.check(mod_full_reml)
+mgcv::concurvity(mod_full_reml)
+
+# Method 1: Permutation importance----------------------------------------------
+set.seed(123)
+cv_folds <- sample(rep(1:5, length.out = length(unique(df_mod$Species))))
+names(cv_folds) <- unique(df_mod$Species)
+
+cv_perm_importance <- function(p) {
+  fold_id <- cv_folds[as.character(df_mod$Species)]
+  loss_difference <- lapply(
+    X = 1:5,
+    FUN = function(k) {
+      train <- df_mod[fold_id != k, , drop = FALSE]
+      test <- df_mod[fold_id == k, , drop = FALSE]
+      
+      mod <- mgcv::gam(
+        frml_full,
+        data = train,
+        method = "REML",
+        family = stats::binomial("logit"),
+        weights = weight
+      )
+      
+      pred <- stats::predict(
+        mod,
+        newdata = test,
+        type = "response"
+      )
+      
+      test_rand <- test %>%
+        dplyr::mutate("{p}" := sample(.data[[p]]))
+      
+      pred_rand <- stats::predict(mod, newdata = test_rand, type = "response")
+      
+      eps <- 1e-15
+      loss <- -sum(
+        test$weight * (
+          test$Invaded * log(pmax(pred, eps)) +
+            (1 - test$Invaded) * log(pmax(1 - pred, eps))
+        )
+      ) / sum(test$weight)
+      
+      loss_rand <- -sum(
+        test$weight * (
+          test$Invaded * log(pmax(pred_rand, eps)) +
+            (1 - test$Invaded) * log(pmax(1 - pred_rand, eps))
+        )
+      ) / sum(test$weight)
+      
+      loss_rand - loss
+    }
+  )
+  
+  mean(unlist(loss_difference))
+}
 
 df_pred_d2 <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
@@ -2609,9 +2688,11 @@ for (i in 1:(length(predictors) + 1)) {
   if (i > length(predictors)) {
       p <- "Biome"
       frml_p <- as.formula("Invaded ~ Biome")
+      frml_d <- make_formula(predictors, biome = FALSE)
     } else {
       p <- predictors[i]
       frml_p <- make_formula(p, biome = FALSE)
+      frml_d <- make_formula(predictors[-i], biome = TRUE)
     }
   
   df_rand <- df_mod %>%
@@ -2619,6 +2700,7 @@ for (i in 1:(length(predictors) + 1)) {
       "{p}" := sample(.data[[p]])
     )
   
+  # Permutation importance
   mod_r <- mgcv::gam(
     frml_full,
     data = df_rand,
@@ -2626,8 +2708,19 @@ for (i in 1:(length(predictors) + 1)) {
     family = stats::binomial("logit"),
     weights = weight
     )
-  adjD2_other <- ecospat::ecospat.adj.D2.glm(mod_r)
+  adjD2_rand <- ecospat::ecospat.adj.D2.glm(mod_r)
   
+  # Drop-one deviance
+  mod_d <- mgcv::gam(
+    frml_d,
+    data = df_mod,
+    method = "REML",
+    family = stats::binomial("logit"),
+    weights = weight
+  )
+  adjD2_drop <- ecospat::ecospat.adj.D2.glm(mod_d)
+  
+  # Single explained deviance
   mod_p <- mgcv::gam(
     frml_p,
     data = df_rand,
@@ -2640,7 +2733,9 @@ for (i in 1:(length(predictors) + 1)) {
     df_pred_d2,
     data.frame(
       Predictor = p,
-      Delta_adjD2 = adjD2_full - adjD2_other,
+      Delta_rand_adjD2 = adjD2_full - adjD2_rand,
+      Delta_drop_adjD2 = adjD2_full - adjD2_drop,
+      Delta_cv_log_loss = cv_perm_importance(p),
       single_adjD2 = adjD2_single
     )
   )
@@ -2659,14 +2754,31 @@ df_pred_d2 <- rbind(
     ),
   data.frame(
     Predictor = c("Shared", "Unexplained"),
-    Delta_adjD2 = c(adjD2_full - sum(df_pred_d2$Delta_adjD2), 1 - adjD2_full),
+    Delta_rand_adjD2 = c(
+      adjD2_full - sum(df_pred_d2$Delta_rand_adjD2), 1 - adjD2_full
+      ),
+    Delta_drop_adjD2 = c(
+      adjD2_full - sum(df_pred_d2$Delta_drop_adjD2), 1 - adjD2_full
+      ),
+    Delta_cv_log_loss = c(NA, NA),
     single_adjD2 = c(NA, NA)
     )
 )
 
+# Plot permutation importance version of deviance "partitioning"
+plot_cols <- colorspace::qualitative_hcl(
+  length(predictors),
+  palette = "Dark 3"
+) %>%
+  stats::setNames(df_pred_d2$Predictor[1:length(predictors)]) %>%
+  c(
+    Shared = "grey70",
+    Unexplained = "grey90"
+  )
+
 gg_pie <- ggplot2::ggplot(
   data = df_pred_d2,
-  ggplot2::aes(x = "", y = Delta_adjD2, fill = Predictor)
+  ggplot2::aes(x = "", y = Delta_rand_adjD2, fill = Predictor)
   ) +
   ggplot2::geom_bar(stat = "identity", width = 1) +
   ggplot2::coord_polar("y", start = 0) +
@@ -2681,19 +2793,7 @@ gg_pie <- ggplot2::ggplot(
     panel.grid.major = ggplot2::element_blank()
     ) +
   #ggplot2::ggtitle("Explained Deviance") +
-  ggplot2::scale_fill_manual(
-    values = c(
-      rgb(0, 102/255, 102/255),
-      "red",
-      "green",
-      rgb(70/255, 100/255, 170/255),
-      "yellow",
-      "orange",
-      "blue",
-      #"grey25",
-      "grey75"
-    )
-  ) +
+  ggplot2::scale_fill_manual(values = plot_cols) +
   ggplot2::guides(
     fill = ggplot2::guide_legend(
       ncol = 2,
@@ -2702,14 +2802,228 @@ gg_pie <- ggplot2::ggplot(
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_fig, "DevExplPie.svg"),
+  filename = file.path(dir_fig, "PermutationImportanceD2Pie.svg"),
   plot = gg_pie,
   width = 5, height = 5.5
   )
 
+# Method 2: Commonality coefficients of incremental explained deviance----------
+## Generate predictor subsets and model formulas
+subsets <- unlist(
+  lapply(
+    seq_along(predictors_hypothesis),
+    function(n) {
+      utils::combn(predictors_hypothesis, n, simplify = FALSE)
+    }
+  ),
+  recursive = FALSE
+)
+
+subsets <- c(list(character(0)), subsets)
+subset_name <- function(x) {
+  if (length(x) == 0) {
+    "baseline"
+  } else {
+    paste(x, collapse = " + ")
+  }
+}
+
+model_formulas <- lapply(
+  X = subsets,
+  FUN = function(hypothesis_predictors) {
+    make_formula(
+      predictors = c(predictors_base, hypothesis_predictors),
+      k = 3,
+      response = "Invaded",
+      biome = TRUE
+    )
+  }
+  )
+
+names(model_formulas) <- vapply(X = subsets, FUN = subset_name, character(1))
+
+## Get baseline predictor smooths to ensure comparability across models
+full_smooth_labels <- vapply(
+  X = mod_full_reml$smooth,
+  FUN = function(x) {x$label},
+  character(1)
+)
+
+baseline_smooth_labels <- paste0("s(", predictors_base,")")
+baseline_sp <- mod_full_reml$sp[
+  match(baseline_smooth_labels, full_smooth_labels)
+]
+
+names(baseline_sp) <- baseline_smooth_labels
+
+## Fit subset models
+fit_subset <- function(formula) {
+  ## Initial fit to estimate smoothing parameters for the
+  ## focal smooths and establish the smooth structure
+  mod <- mgcv::gam(
+    formula,
+    data = df_mod,
+    method = "REML",
+    family = stats::binomial("logit"),
+    weights = weight
+  )
+  
+  smooth_labels <- vapply(X = mod$smooth, FUN = function(x) {x$label}, character(1))
+  sp <- mod$sp
+  names(sp) <- smooth_labels
+  
+  ## Replace baseline smoothing parameters with those from full model
+  sp[names(sp) %in% names(baseline_sp)] <- baseline_sp
+  sp[!names(sp) %in% names(baseline_sp)] <- -1
+  
+  ## Refit with baseline smoothness fixed
+  mgcv::gam(
+    formula,
+    data = df_mod,
+    method = "REML",
+    family = stats::binomial("logit"),
+    weights = weight,
+    sp = sp
+  )
+}
+
+models <- lapply(X = model_formulas,FUN = fit_subset)
+names(models) <- names(model_formulas)
+
+adjD2s <- lapply(X = models, FUN = ecospat::ecospat.adj.D2.glm)
+
+res_dev_baseline <- stats::deviance(models[["baseline"]])
+res_dev <- function(x) {res_dev_baseline - stats::deviance(models[[subset_name(x)]])}
+
+A <- predictors_hypothesis[1]
+B <- predictors_hypothesis[2]
+C <- predictors_hypothesis[3]
+
+res_dev_total <- res_dev(c(A, B, C))
+
+commonality <- c(
+  A = res_dev(c(A, B, C)) - res_dev(c(B, C)),
+  B = res_dev(c(A, B, C)) - res_dev(c(A, C)),
+  C = res_dev(c(A, B, C)) - res_dev(c(A, B)),
+  `A + B` = res_dev(c(A, B)) - res_dev(A) - res_dev(B),
+  `A + C` = res_dev(c(A, C)) - res_dev(A) - res_dev(C),
+  `B + C` = res_dev(c(B, C)) - res_dev(B) - res_dev(C),
+  `A + B + C` =
+    res_dev(c(A, B, C)) -
+    res_dev(c(A, B)) -
+    res_dev(c(A, C)) -
+    res_dev(c(B, C)) +
+    res_dev(A) +
+    res_dev(B) +
+    res_dev(C)
+)
+
+commonality_df <- data.frame(
+  Component = names(commonality),
+  Deviance = unname(commonality)
+) %>%
+  dplyr::mutate(
+    Share = Deviance / res_dev_total,
+    Type = dplyr::if_else(grepl(" \\+ ", Component), "Shared", "Unique")
+  )
+
+sum(commonality_df$Deviance)
+res_dev_total
+
+# Species richness and connected area exhibit a negative commonality component,
+# indicating suppression/non-additivity in their explanatory contributions.
+deviance_null <- models[["baseline"]]$null.deviance
+deviance_baseline <- stats::deviance(models[["baseline"]])
+deviance_full <- stats::deviance(models[[subset_name(predictors_hypothesis)]])
+
+df_deviance <- data.frame(
+  Component = factor(
+    df_deviance$Component,
+    levels = c("Unexplained", "Hypothesis", "Baseline")
+    ),
+  Deviance = c(
+    deviance_null - deviance_baseline,
+    deviance_baseline - deviance_full,
+    deviance_full
+  )
+) %>%
+  dplyr::mutate(Share = Deviance / deviance_null)
+
+gg_shares <- ggplot2::ggplot(
+  df_deviance,
+  ggplot2::aes(x = 0, y = Share, fill = Component)
+) +
+  ggplot2::geom_col(width = 0.5) +
+  ggplot2::scale_y_continuous(
+    breaks = c(0, cumsum(df_deviance$Share)),
+    labels = scales::label_percent(),
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::geom_col(
+    width = 0.5,
+    colour = "black",
+    linewidth = 0.5
+  ) +
+  ggplot2::labs(x = NULL, y = "Proportion of total deviance", fill = NULL) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    axis.text.x = ggplot2::element_blank(),
+    #axis.text.y = ggplot2::element_blank(),
+    #axis.ticks.y = ggplot2::element_blank(),
+    legend.position = "bottom"
+  ) +
+  ggplot2::scale_fill_manual(
+    values = c(
+      Baseline = "grey60",
+      Hypothesis = "grey30",
+      Unexplained = "white"
+    )
+  )
+
+gg_increments <- ggplot2::ggplot(
+  commonality_df,
+  ggplot2::aes(
+    x = reorder(Component, Share),
+    y = Share,
+    fill = Type
+  )
+) +
+  ggplot2::geom_col() +
+  ggplot2::geom_hline(
+    yintercept = 0,
+    linewidth = 0.4
+  ) +
+  ggplot2::coord_flip() +
+  ggplot2::scale_y_continuous(
+    labels = scales::label_percent()
+  ) +
+  ggplot2::labs(
+    x = NULL,
+    y = "Share of incremental explained deviance",
+    fill = NULL
+  ) +
+  ggplot2::theme_bw() +
+  ggplot2::theme(
+    legend.position = "bottom"
+  )
+
+gg_combined <- gg_shares + gg_increments +
+  patchwork::plot_layout(
+    widths = c(1, 4)
+  ) +
+  patchwork::plot_annotation(
+    tag_levels = "a"
+  )
+
+ggplot2::ggsave(
+  filename = file.path(dir_fig, "CommonalityAnalysis.svg"),
+  plot = gg_combined,
+  width = 8, height = 5
+)
+
 # Fit model per biome, estimate explained deviance contributions
 # and plot response shapes
-
 #
 # Maybe worth a try: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
 #

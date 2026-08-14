@@ -54,7 +54,8 @@ biomes <- terra::vect(f_bfullinfo)
 terra::extract(
   road_density,
   biomes,
-  fun = "mean"
+  fun = "mean",
+  na.rm = TRUE
 ) %>%
   dplyr::mutate(
     RoadDensity = base::replace(RoadDensity, is.na(RoadDensity), 0)
@@ -67,7 +68,8 @@ terra::extract(
 terra::extract(
   gdp,
   biomes,
-  fun = "mean"
+  fun = "mean",
+  na.rm = TRUE
 ) %>%
   dplyr::mutate(
     gdp1990to2020 = base::replace(gdp1990to2020, is.na(gdp1990to2020), 0)

@@ -77,3 +77,5 @@ for (p in potential_predictors_h) {
     "\n"
   )
 }
+
+cor.test(df_mod_h$logRoadDensity, df_mod_h$logGDP, method = "pearson")
