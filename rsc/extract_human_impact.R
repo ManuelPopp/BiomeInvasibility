@@ -85,27 +85,3 @@ terra::extract(
     file = f_gdp,
     row.names = FALSE
   )
-
-gdp <- read.csv(f_gdp)
-
-biomes <- biomes %>%
-  terra::merge(gdp, by = "ID", all.x = TRUE)
-
-library("viridisLite")
-
-brks <- quantile(
-  biomes$gdp1990to2020,
-  probs = seq(0, 1, length.out = 4),
-  na.rm = TRUE
-)
-
-png(filename = "/lud11/poppman/test_gdp.png", width = 1024, height = 512)
-plot(
-  biomes["gdp1990to2020"],
-  breaks = brks,
-  col = viridisLite::viridis(n = length(brks) - 1),
-  main = "Average GDP 1990–2020"
-)
-dev.off()
-
-terra::writeVector(biomes, filename = "/lud11/poppman/biomes_test.gpkg", overwrite = TRUE)

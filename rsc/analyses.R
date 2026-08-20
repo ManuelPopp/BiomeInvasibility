@@ -70,9 +70,11 @@ biome_def <- "olson"
 if (Sys.info()["sysname"] == "Windows") {
   dir_main <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir"
   dir_lud11 <- "L:"
+  dir_fig_online <- "C:/Users/poppman/Dropbox/Apps/Overleaf/BiomeInvasibility"
 } else {
   dir_main <- "/lud11/poppman/data/bir"
   dir_lud11 <- "/lud11"
+  dir_fig_online <- base::tempdir()
 }
 
 dir_dat <- file.path(dir_lud11, "poppman", "data", "bir", "dat", "lud11")
@@ -186,6 +188,33 @@ if (!dir.exists(dir_imed)) {
 #>=============================================================================<
 #> Functions
 #<=============================================================================>
+
+## Safe figures
+safe_figure <- function(name, plot, ...) {
+  args <- list(...)
+  
+  do.call(
+    ggplot2::ggsave,
+    c(
+      list(
+        filename = file.path(dir_fig, paste0(name, ".svg")),
+        plot = plot
+      ),
+      args
+    )
+  )
+  
+  do.call(
+    ggplot2::ggsave,
+    c(
+      list(
+        filename = file.path(dir_fig_online, paste0(name, ".pdf")),
+        plot = plot
+      ),
+      args
+    )
+  )
+}
 
 ## Ensure fallback operator exists
 `%||%` <- function(x, y) if (is.null(x)) y else x
@@ -771,10 +800,7 @@ gg_sr_comp <- GGally::ggpairs(
 ) +
   ggplot2::theme_bw()
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "SR_estimate_comparison.svg"),
-  plot = gg_sr_comp, width = 7, height = 7
-  )
+safe_figure("SR_estimate_comparison", plot = gg_sr_comp, width = 7, height = 7)
 
 cat(
   "\nBreakaway:", length(which(is.finite(gg_sr_df$logSpeciesRichnessBa))),
@@ -1246,9 +1272,8 @@ gg_gist <- ggplot2::ggplot(
 
 ggplot2::ggsave(
   filename = file.path(dir_fig, "BoxplotGISDclasses.svg"),
-  plot = gg_gist,
-  width = 7, height = 5
-)
+  plot = gg_gist, width = 7, height = 5
+  )
 
 gg_gist_Ba <- ggplot2::ggplot(
   data = ggdf,
@@ -1386,15 +1411,16 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   ) +
   ggplot2::theme_bw() +
   ggplot2::theme(
-    legend.position = "right",
+    legend.position = "bottom",
+    legend.key.width = ggplot2::unit(4, "in"),
     axis.text = ggplot2::element_blank(),
-    axis.ticks = ggplot2::element_blank()
+    axis.ticks = ggplot2::element_blank(),
+    plot.margin = ggplot2::margin(0, 0, 0, 0)
   )
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "SInAS_donors_and_receivers.png"),
-  plot = gg_dr,
-  width = 7, height = 6 # 13 and 3 for two-column version
+safe_figure(
+  "SInAS_donors_and_receivers", plot = gg_dr,
+  width = 6, height = 7 # 13 and 3 for two-column version
   )
 
 
@@ -1588,9 +1614,8 @@ gg_area <- ggplot2::ggplot(
     #   )
   )
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "MaxAreaRichnessBoxplot.svg"),
-  plot = gg_area,
+safe_figure(
+  "MaxAreaRichnessBoxplot", plot = gg_area,
   width = 3.3 * length(metrics), height = 4
 )
 
@@ -2629,7 +2654,7 @@ mgcv::gam.check(mod_full_reml)
 mgcv::concurvity(mod_full_reml)
 
 # Method 1: Permutation importance----------------------------------------------
-set.seed(123)
+set.seed(42)
 cv_folds <- sample(rep(1:5, length.out = length(unique(df_mod$Species))))
 names(cv_folds) <- unique(df_mod$Species)
 
@@ -2682,7 +2707,7 @@ cv_perm_importance <- function(p) {
   mean(unlist(loss_difference))
 }
 
-df_pred_d2 <- data.frame()
+df_pred_d2_predictors <- data.frame()
 pb <- progress::progress_bar$new(total = length(predictors) + 1)
 for (i in 1:(length(predictors) + 1)) {
   if (i > length(predictors)) {
@@ -2729,8 +2754,8 @@ for (i in 1:(length(predictors) + 1)) {
     )
   adjD2_single <- ecospat::ecospat.adj.D2.glm(mod_p)
   
-  df_pred_d2 <- rbind(
-    df_pred_d2,
+  df_pred_d2_predictors <- rbind(
+    df_pred_d2_predictors,
     data.frame(
       Predictor = p,
       Delta_rand_adjD2 = adjD2_full - adjD2_rand,
@@ -2745,66 +2770,122 @@ for (i in 1:(length(predictors) + 1)) {
 rm(pb)
 
 df_pred_d2 <- rbind(
-  df_pred_d2 %>%
+  df_pred_d2_predictors %>%
     dplyr::mutate(
+      Partition = factor(
+        ifelse(Predictor %in% predictors_base, "Baseline", "Theory"),
+        levels = c("Baseline", "Theory", "Shared", "Unexplained")
+      ),
       Predictor = sapply(
         Predictor,
         function(x) trimws(sub("log", "", gsub("([A-Z])", " \\1", x)))
       )
-    ),
+    ) %>%
+    dplyr::arrange(Partition, dplyr::desc(Delta_rand_adjD2)),
   data.frame(
     Predictor = c("Shared", "Unexplained"),
     Delta_rand_adjD2 = c(
-      adjD2_full - sum(df_pred_d2$Delta_rand_adjD2), 1 - adjD2_full
+      adjD2_full - sum(df_pred_d2_predictors$Delta_rand_adjD2), 1 - adjD2_full
       ),
     Delta_drop_adjD2 = c(
-      adjD2_full - sum(df_pred_d2$Delta_drop_adjD2), 1 - adjD2_full
+      adjD2_full - sum(df_pred_d2_predictors$Delta_drop_adjD2), 1 - adjD2_full
       ),
     Delta_cv_log_loss = c(NA, NA),
-    single_adjD2 = c(NA, NA)
+    single_adjD2 = c(NA, NA),
+    Partition = c("Shared", "Unexplained")
     )
-)
+) %>%
+  dplyr::mutate(
+    Predictor = factor(Predictor, levels = Predictor)
+  )
 
 # Plot permutation importance version of deviance "partitioning"
 plot_cols <- colorspace::qualitative_hcl(
-  length(predictors),
+  nrow(df_pred_d2) - 2,
   palette = "Dark 3"
 ) %>%
-  stats::setNames(df_pred_d2$Predictor[1:length(predictors)]) %>%
   c(
     Shared = "grey70",
     Unexplained = "grey90"
+  ) %>%
+  stats::setNames(df_pred_d2$Predictor)
+
+partition_cols <- c("gray50", "black", "gray70", "gray90")
+
+df_partition <- df_pred_d2 %>%
+  dplyr::group_by(Partition) %>%
+  dplyr::summarise(
+    Delta_rand_adjD2 = sum(Delta_rand_adjD2),
+    .groups = "drop"
+  ) %>%
+  dplyr::mutate(
+    ring = 1
   )
 
-gg_pie <- ggplot2::ggplot(
-  data = df_pred_d2,
-  ggplot2::aes(x = "", y = Delta_rand_adjD2, fill = Predictor)
+df_predictor <- df_pred_d2 %>%
+  dplyr::mutate(ring = 2)
+
+gg_pie <- ggplot2::ggplot() +
+  ggplot2::geom_col(
+    data = df_partition,
+    ggplot2::aes(
+      x = ring,
+      y = Delta_rand_adjD2,
+      fill = Partition
+    ),
+    width = 1
   ) +
-  ggplot2::geom_bar(stat = "identity", width = 1) +
-  ggplot2::coord_polar("y", start = 0) +
-  ggplot2::theme_minimal() +
-  ggplot2::theme(
-    legend.position = "bottom",
-    legend.title = ggplot2::element_blank(),
-    axis.title.x = ggplot2::element_blank(),
-    axis.title.y = ggplot2::element_blank(),
-    axis.text.x = ggplot2::element_blank(),
-    axis.text.y = ggplot2::element_blank(),
-    panel.grid.major = ggplot2::element_blank()
-    ) +
-  #ggplot2::ggtitle("Explained Deviance") +
-  ggplot2::scale_fill_manual(values = plot_cols) +
+  ggplot2::scale_fill_manual(
+    values = partition_cols,
+    name = "Partition"
+  ) +
   ggplot2::guides(
     fill = ggplot2::guide_legend(
       ncol = 2,
       byrow = TRUE
     )
-  )
+  ) +
+  ggnewscale::new_scale_fill() +
+  ggplot2::geom_col(
+    data = df_predictor,
+    ggplot2::aes(
+      x = ring,
+      y = Delta_rand_adjD2,
+      fill = Predictor
+    ),
+    width = 1
+  ) +
+  ggplot2::scale_fill_manual(
+    values = plot_cols,
+    breaks = setdiff(names(plot_cols), c("Shared", "Unexplained")),
+    name = "Predictor"
+  ) +
+  ggplot2::guides(
+    fill = ggplot2::guide_legend(
+      ncol = 2,
+      byrow = TRUE
+    )
+  ) +
+  ggplot2::coord_polar(theta = "y", start = 0, clip = "off") +
+  ggplot2::scale_x_continuous(limits = c(0.5, 2.5), expand = c(0, 0)) +
+  ggplot2::theme_minimal() +
+  ggplot2::theme(
+    legend.position = "bottom",
+    aspect.ratio = 1,
+    legend.title = ggplot2::element_blank(),
+    axis.title.x = ggplot2::element_blank(),
+    axis.title.y = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_blank(),
+    axis.text.y = ggplot2::element_blank(),
+    panel.grid.major = ggplot2::element_blank(),
+    plot.margin = ggplot2::margin(-30, -30, 0, -30),
+    legend.spacing.y = ggplot2::unit(1, "pt")
+    )
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "PermutationImportanceD2Pie.svg"),
+safe_figure(
+  "PermutationImportanceD2Pie",
   plot = gg_pie,
-  width = 5, height = 5.5
+  width = 6, height = 6
   )
 
 # Method 2: Commonality coefficients of incremental explained deviance----------
@@ -2938,8 +3019,8 @@ deviance_full <- stats::deviance(models[[subset_name(predictors_hypothesis)]])
 
 df_deviance <- data.frame(
   Component = factor(
-    df_deviance$Component,
-    levels = c("Unexplained", "Hypothesis", "Baseline")
+    c("Baseline", "Theory", "Unexplained"),
+    levels = c("Unexplained", "Theory", "Baseline")
     ),
   Deviance = c(
     deviance_null - deviance_baseline,
@@ -2976,7 +3057,7 @@ gg_shares <- ggplot2::ggplot(
   ggplot2::scale_fill_manual(
     values = c(
       Baseline = "grey60",
-      Hypothesis = "grey30",
+      Theory = "grey30",
       Unexplained = "white"
     )
   )
@@ -3016,18 +3097,14 @@ gg_combined <- gg_shares + gg_increments +
     tag_levels = "a"
   )
 
-ggplot2::ggsave(
-  filename = file.path(dir_fig, "CommonalityAnalysis.svg"),
-  plot = gg_combined,
-  width = 8, height = 5
-)
+safe_figure("CommonalityAnalysis", plot = gg_combined, width = 8, height = 5)
 
 # Fit model per biome, estimate explained deviance contributions
 # and plot response shapes
 #
 # Maybe worth a try: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
 #
-stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
+#stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
 
 response_labeller <- function(x) {
   is_log <- grepl("^log", x)
@@ -3277,6 +3354,7 @@ for (bi in sort(unique(df_mod$Biome))) {
   
   plot_list[[bi]] <- p_final
   bi_idx <- which(levels(df_mod$Biome) == bi)
+  
   ggplot2::ggsave(
     filename = file.path(dir_plots, paste0("Response_", bi_idx, ".svg")),
     plot = p_final, width = 3, height = 7

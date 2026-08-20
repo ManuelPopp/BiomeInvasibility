@@ -86,6 +86,7 @@ get_species_richness <- function(biome_id) {
     return(
       data.frame(
         ID = biome_id,
+        speciesRichnessRaw = NA,
         speciesRichnessBa = NA,
         speciesRichnessBaSE = NA,
         speciesRichnessChao1 = NA,
@@ -99,6 +100,9 @@ get_species_richness <- function(biome_id) {
       )
     )
   }
+  
+  # Counted species
+  spec_count <- unique(sub_tab$specID)
   
   # Based on total observation counts
   obs_counts <- sub_tab %>%
@@ -142,6 +146,7 @@ get_species_richness <- function(biome_id) {
   
   df <- data.frame(
     ID = as.num(biome_id),
+    speciesRichnessRaw = spec_count,
     speciesRichnessBa = as.num(baway$est),
     speciesRichnessBaSE = as.num(baway$se),
     speciesRichnessChao1 = as.num(chao1["S.chao1"]),
