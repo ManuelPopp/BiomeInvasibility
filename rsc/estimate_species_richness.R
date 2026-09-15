@@ -102,7 +102,7 @@ get_species_richness <- function(biome_id) {
   }
   
   # Counted species
-  spec_count <- unique(sub_tab$specID)
+  spec_count <- length(unique(sub_tab$specID))
   
   # Based on total observation counts
   obs_counts <- sub_tab %>%

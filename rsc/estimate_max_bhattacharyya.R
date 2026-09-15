@@ -264,8 +264,8 @@ dy <- diff(df_pred$yhat) / diff(df_pred$logBhattacharyya)
 i_min <- which.min(dy)
 x_star <- xseq[i_min]
 
-max_lobBhat <- round(x_star, 2)
-# max_lobBhat = 1.34
+inflection_logBhat <- round(x_star, 2)
+# inflection_logBhat = 1.34
 
 gg_resp_bhat <- ggplot2::ggplot(
   dplyr::filter(df_plot, Predictor == "Bhattacharyya"),

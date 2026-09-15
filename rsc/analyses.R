@@ -13,6 +13,7 @@ library("stringr")
 library("boot")
 library("rsdd")
 library("ggplot2")
+library("gghalves") # pak::pak("erocoar/gghalves")
 library("patchwork")
 library("viridis")
 library("dplyr")
@@ -71,10 +72,12 @@ if (Sys.info()["sysname"] == "Windows") {
   dir_main <- "D:/onedrive/OneDrive - Eidg. Forschungsanstalt WSL/switchdrive/PhD/prj/bir"
   dir_lud11 <- "L:"
   dir_fig_online <- "C:/Users/poppman/Dropbox/Apps/Overleaf/BiomeInvasibility"
+  dir_tab_online <- "C:/Users/poppman/Dropbox/Apps/Overleaf/BiomeInvasibility/tab"
 } else {
   dir_main <- "/lud11/poppman/data/bir"
   dir_lud11 <- "/lud11"
   dir_fig_online <- base::tempdir()
+  dir_tab_online <- base::tempdir()
 }
 
 dir_dat <- file.path(dir_lud11, "poppman", "data", "bir", "dat", "lud11")
@@ -203,7 +206,8 @@ safe_figure <- function(name, plot, ...) {
       args
     )
   )
-  
+  cat("\nSaved figure to:")
+  cat(file.path(dir_fig, paste0(name, ".svg")))
   do.call(
     ggplot2::ggsave,
     c(
@@ -214,6 +218,9 @@ safe_figure <- function(name, plot, ...) {
       args
     )
   )
+  cat("\nSaved figure to:")
+  cat(file.path(dir_fig_online, paste0(name, ".pdf")))
+  cat("\n")
 }
 
 ## Ensure fallback operator exists
@@ -390,20 +397,85 @@ boot_conf_int <- function(sdf, frml, fam, coef_names) {
   data.frame(
     predictor = coef_names,
     estimate = estimates,
-    
     ci90_low  = apply(boot_mat, 2, quantile, probs = 0.05,  na.rm = TRUE),
     ci90_high = apply(boot_mat, 2, quantile, probs = 0.95,  na.rm = TRUE),
-    
     ci95_low  = apply(boot_mat, 2, quantile, probs = 0.025, na.rm = TRUE),
     ci95_high = apply(boot_mat, 2, quantile, probs = 0.975, na.rm = TRUE),
-    
     ci99_low  = apply(boot_mat, 2, quantile, probs = 0.005, na.rm = TRUE),
     ci99_high = apply(boot_mat, 2, quantile, probs = 0.995, na.rm = TRUE),
-    
     sign_stability = round(100 * sign_stability, 1),
-    
     row.names = NULL,
     check.names = FALSE
+  )
+}
+
+save_deviance_table <- function(x, file = "deviance_table.tex") {
+  predictor_labels <- c(logBhattacharyya = "Bhattacharyya distance",
+    logSamplingEffort = "Sampling effort", logGDP = "GDP",
+    logRoadDensity = "Road density", logConnAreaRatio = "Connected area ratio",
+    Biome = "Biome", logCorrectedRichnessRatio = "Corrected richness ratio",
+    climateVelocityRank = "Climate velocity"
+  )
+  partition_labels <- c(
+    Baseline = "Baseline", Focal = "Focal", Shared = "Shared",
+    Unexplained = "Unexplained"
+    )
+  x <- x %>%
+    dplyr::mutate(
+      Predictor = dplyr::recode(Predictor, !!!predictor_labels),
+      Partition = dplyr::recode(Partition, !!!partition_labels)
+    )
+  
+  header <- c(
+    "\\begin{table}[htbp]",
+    "\\centering",
+    paste0(
+    "\\caption{Permutation-based predictor importance and deviance partitioning",
+    " for generalised additive models (GAMs) with a binomial error distribution",
+    " and logit link predicting whether a non-native species was detected in a ",
+    "biome patch or not. $\\Delta D^2_{\\mathrm{adj}}$ denotes the decrease in",
+    " adjusted explained deviance following either randomisation of a predictor",
+    " (rand), followed by model refitting, or complete removal of a predictor ",
+    "from the model (drop), followed by model refitting. CV $\\Delta$ log loss ",
+    "denotes the increase in out-of-sample logarithmic loss averaged across 30 ",
+    "permutations of each predictor in the held-out data of a 5-fold",
+    " cross-validation, with the model fitted to the corresponding training ",
+    "data and predictions evaluated on the unchanged and permuted test data. ",
+    "Larger values indicate greater predictor importance.}"
+    ),
+    "\\label{tab:deviance_partitioning}",
+    "\\begin{tabular}{lSSS}",
+    "\\toprule",
+    "Predictor & {$\\Delta D^2_{\\mathrm{adj,rand}}$} & {$\\Delta D^2_{\\mathrm{adj,drop}}$} & {CV $\\Delta$ log loss} \\\\",
+    "\\midrule"
+  )
+  rows <- character(0)
+  for (i in seq_len(nrow(x))) {
+    if (i > 1 && x$Partition[i] != x$Partition[i - 1]) {
+      rows <- c(rows, "\\cmidrule(lr){1-4}")
+      }
+    values <- ifelse(
+      is.na(x[i, c("Delta_rand_adjD2", "Delta_drop_adjD2", "Delta_cv_log_loss")]),
+      "",
+      sprintf(
+        "%.4f",
+        as.numeric(
+          x[i, c("Delta_rand_adjD2", "Delta_drop_adjD2", "Delta_cv_log_loss")]
+          )
+        )
+      )
+    row <- paste(x$Predictor[i], values[1], values[2], values[3], sep = " & ") %>%
+        paste0(" \\\\")
+    rows <- c(rows, row)
+  }
+  footer <- c(
+    "\\bottomrule",
+    "\\end{tabular}",
+    "\\end{table}"
+  )
+  writeLines(
+    c(header, rows, footer),
+    con = file
   )
 }
 
@@ -1399,7 +1471,8 @@ values(remerge) <- biomes %>%
     species_count = replace_na(species_count, 0)
     )
 
-polygons_sf <- sf::st_as_sf(remerge)
+polygons_sf <- sf::st_as_sf(remerge) %>%
+  sf::st_transform(crs = "epsg:8857")
 gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
   ggplot2::geom_sf(ggplot2::aes(fill = species_count)) +
@@ -1409,12 +1482,14 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
     option = "viridis",
     na.value = "grey90"
   ) +
-  ggplot2::theme_bw() +
+  ggplot2::theme_minimal() +
   ggplot2::theme(
     legend.position = "bottom",
-    legend.key.width = ggplot2::unit(4, "in"),
+    legend.key.width = ggplot2::unit(1, "cm"),
+    strip.background = ggplot2::element_blank(),
     axis.text = ggplot2::element_blank(),
     axis.ticks = ggplot2::element_blank(),
+    axis.title = ggplot2::element_blank(),
     plot.margin = ggplot2::margin(0, 0, 0, 0)
   )
 
@@ -1422,6 +1497,47 @@ safe_figure(
   "SInAS_donors_and_receivers", plot = gg_dr,
   width = 6, height = 7 # 13 and 3 for two-column version
   )
+
+polygons_sf$sp_fraction <- pmin(
+  1,
+  pmax(0, polygons_sf$species_count / polygons_sf$speciesRichnessRaw)
+)
+polygons_sf$sp_fraction[
+  which(polygons_sf$species_count >= polygons_sf$speciesRichnessRaw)
+] <- NA
+
+gg_dr_norm <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
+  ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
+  ggplot2::geom_sf(ggplot2::aes(fill = sp_fraction)) +
+  ggplot2::facet_wrap(~ Status, nrow = 2) +
+  ggplot2::scale_fill_viridis_c(
+    name = "Fraction of ob-\nserved species\n",
+    option = "viridis",
+    trans = "log10",
+    labels = scales::label_number(accuracy = 0.01),
+    na.value = "grey90",
+  ) +
+  ggplot2::theme_minimal(base_size = 10) +
+  ggplot2::theme(
+    legend.position = "top",
+    strip.background = ggplot2::element_blank(),
+    strip.text = ggplot2::element_text(face = "bold", size = 12),
+    legend.key.height = ggplot2::unit(1.0, "cm"),
+    legend.key.width = ggplot2::unit(3.0, "cm"),
+    axis.text = ggplot2::element_blank(),
+    axis.ticks = ggplot2::element_blank(),
+    axis.title = ggplot2::element_blank(),
+    legend.title = ggplot2::element_text(size = 12),
+    legend.text = ggplot2::element_text(size = 12),
+    legend.margin = ggplot2::margin(t = 0, r = 0, b = 0, l = -5),
+    panel.grid.minor = ggplot2::element_blank(),
+    plot.margin = ggplot2::margin(0, 0, 0, 0)
+  )
+
+safe_figure(
+  "SInAS_donors_and_receivers_norm", plot = gg_dr_norm,
+  width = 6, height = 7 # 13 and 3 for two-column version
+)
 
 
 #-------------------------------------------------------------------------------
@@ -1536,9 +1652,10 @@ stats <- test_res %>%
   dplyr::left_join(metric_max_values, by = "metric") %>%
   dplyr::mutate(
     label = paste0(
-      "W = ", statistic,
-      "\n", "p = ", signif(p.adj, 3),
-      "\n", "effect size = ", sprintf("%.2f", effsize)
+      "W\u2009=\u2009", statistic,
+      "\n", "p\u2009=\u2009", signif(p.adj, 3),
+      "\n", "effect size\u2009=\u2009", sprintf("%.2f", effsize),
+      "\n", "N\u2009=\u2009", n1
     ),
     y.position = max_value,
     .y. = "value"
@@ -1570,7 +1687,24 @@ gg_area <- ggplot2::ggplot(
   boxplot_data,
   ggplot2::aes(x = Status, y = value, fill = Status)
   ) +
-  ggplot2::geom_boxplot(alpha = 0.7, outlier.alpha = 0.3) +
+  gghalves::geom_half_violin(ggplot2::aes(fill = Status), side = "l") +
+  ggplot2::scale_fill_manual(
+    values = c( # Avoid alpha due to potential issues depending on export format
+      "Donor" = "#84B3CB",#colorspace::lighten("#2E86AB", amount = 0.3),
+      "Receiver" = "#C086A8"#colorspace::lighten("#A23B72", amount = 0.3)
+    )
+  ) +
+  ggnewscale::new_scale_fill() +
+  ggplot2::geom_boxplot(
+    ggplot2::aes(fill = Status),
+    width = 0.15,
+    alpha = 1, #0.7,
+    outlier.shape = NA,
+    outlier.alpha = 0.3
+    ) +
+  ggplot2::scale_fill_manual(
+    values = c("Donor" = "#2E86AB", "Receiver" = "#A23B72")
+  ) +
   ggplot2::facet_wrap(
     ~ metric, scales = "free_y", nrow = 1,
     labeller = as_labeller(
@@ -1582,33 +1716,54 @@ gg_area <- ggplot2::ggplot(
       )
     )
   ) +
-  ggplot2::scale_fill_manual(
-    values = c("Donor" = "#2E86AB", "Receiver" = "#A23B72")
-  ) +
-  # Boxplots are shown on a logarithmic scale to accommodate the large dynamic range of values.
-  #ggplot2::scale_y_log10() +
-  ggplot2::coord_transform(y = "log10") +
   ggplot2::labs(
     title = NULL,
     y = expression("Area in " * 10^3 * " km"^2 * " or estimated number or species"),
     x = "Biome patch status"
   ) +
-  ggplot2::theme_bw() +
+  ggplot2::theme_classic(base_size = 10) +
   ggplot2::theme(
     legend.position = "none",
-    strip.background = ggplot2::element_rect(fill = "lightgray"),
-    strip.text = ggplot2::element_text(face = "bold", size = 10),
+    strip.background = ggplot2::element_blank(), # ggplot2::element_rect(fill = "lightgray"),
+    strip.text = ggplot2::element_text(face = "bold", size = 12),
+    axis.title.x = ggplot2::element_text(size = 12),
+    axis.title.y = ggplot2::element_text(size = 12),
+    axis.text.x = ggplot2::element_text(size = 12),
+    axis.text.y = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_text(size = 12),
     panel.grid.minor = ggplot2::element_blank()
   ) +
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(
-      x = 1.5, label = label, vjust = ifelse(place_low, 4.5, 1.5)
+      x = 1.5, label = label, vjust = ifelse(place_low, 3.0, 1.25)
       )
     ) +
-  ggplot2::scale_y_continuous(
+  # Boxplots are shown on a logarithmic scale to accommodate the large dynamic range of values.
+  #ggplot2::coord_transform(y = "log10") +
+  ggplot2::scale_y_log10(
     breaks = scales::breaks_log(n = 5),
-    labels = scales::label_scientific()#,
+    labels = function(x) {
+      sapply(x, function(value) {
+        if (!is.finite(value)) {
+          return(NA_character_)
+        }
+        if (value <= 10) {
+          return(as.character(value))
+        }
+        exponent <- floor(log10(value))
+        mantissa <- value / 10^exponent
+        if (mantissa == 1) {
+          return(paste0("10^", exponent))
+        }
+        paste0(
+          "'", base::formatC(mantissa, format = "f", digits = 1),
+          "' ~ '\u00D7' ~ 10^",
+          exponent
+        )
+      }) |>
+        parse(text = _)
+    }#scales::label_scientific()#,
     # sec.axis = sec_axis(
     #   ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
     #   )
@@ -1617,6 +1772,50 @@ gg_area <- ggplot2::ggplot(
 safe_figure(
   "MaxAreaRichnessBoxplot", plot = gg_area,
   width = 3.3 * length(metrics), height = 4
+)
+
+
+## Safe combined plot¨
+labels_map <- data.frame(
+  Status = sort(unique(polygons_sf$Status)),
+  label = letters[1:length(unique(polygons_sf$Status))]
+)
+
+labels_boxplot <- data.frame(
+  metric = levels(boxplot_data$metric),
+  Status = sort(boxplot_data$Status)[1:length(levels(boxplot_data$metric))],
+  label = letters[
+    1:length(levels(boxplot_data$metric)) + length(unique(polygons_sf$Status))
+    ]
+)
+gg_a <- gg_dr_norm +
+  ggplot2::geom_text(
+    data = labels_map,
+    ggplot2::aes(x = -Inf, y = Inf, label = label),
+    hjust = -1,
+    vjust = 1,
+    size = 5,
+    fontface = "bold"
+  )
+gg_b <- gg_area +
+  ggplot2::geom_text(
+    data = labels_boxplot,
+    ggplot2::aes(x = -Inf, y = Inf, label = label),
+    hjust = -1,
+    vjust = 1,
+    size = 5,
+    fontface = "bold"
+  )
+
+combined <- (gg_a / gg_b) +
+  patchwork::plot_layout(
+    widths = c(1.1, 1),
+    heights = c(0.78, 0.22)
+    )
+
+safe_figure(
+  "CombinedBoxplotsAndMap", plot = combined,
+  width = 10, height = 14
 )
 
 
@@ -2309,7 +2508,13 @@ merged_env <- merge(merged, env_df, by = "ID", all.x = TRUE) %>%
 
 # Run estimate_max_bhattacharyya.R to estimate the maximum environmental distance
 # for sampling potentially invaded plots
-max_lobBhat <- 1.34
+inflection_logBhat <- 1.34 # log Bhattacharyya dist. at inflection (prob = 0.5)
+scale = inflection_logBhat / log(3) # Scale that 2*inflection_logBhat=prob 0.25
+max_Bhattacharyya <- 21.77456 # 95% Quantile of max Bhattacharyya dists across species
+# To export data and run snippet on cluster:
+# save.image(file = "L:/poppman/tmp.Rsave")
+# load("/lud11/poppman/tmp.Rsave")
+# while(!file.exists(f_invasion)) {Sys.sleep(30 * 60)}
 
 # Create sample data frame
 f_invasion <- file.path(dir_imed, "df_invasion.Rsave")
@@ -2404,8 +2609,16 @@ if (file.exists(f_invasion)) {
           ) %>%
           dplyr::filter(
             Bhattacharyya_reason == "ok",
-            Bhattacharyya < exp(max_lobBhat)
-          )
+            Bhattacharyya > 0
+          ) %>%
+          dplyr::mutate(
+            logBhattacharyya = log(Bhattacharyya),
+            p_select = 1 / (
+              1 + exp((logBhattacharyya  - inflection_logBhat) / scale)
+              ),
+            selected = Bhattacharyya < max_Bhattacharyya # runif(dplyr::n()) < p_select
+          ) %>%
+          dplyr::filter(selected)
           
         # Generate output data.frame
         out <- dplyr::bind_rows(
@@ -2494,6 +2707,28 @@ potential_predictors <- c(
   "climateStability", "logBhattacharyya", human_pred
 )
 
+#bhatSummary <- df_invasion %>%
+#  dplyr::filter(Invaded == 1) %>%
+#  dplyr::group_by(Species) %>%
+#  dplyr::summarise(
+#    minBhat = min(Bhattacharyya, na.rm = TRUE),
+#    medianBhat = median(Bhattacharyya, na.rm = TRUE),
+#    maxBhat = max(Bhattacharyya, na.rm = TRUE)
+#    ) %>%
+#  dplyr::filter(
+#    is.finite(minBhat)
+#  )
+#
+#max_Bhattacharyya <- as.numeric(
+#  quantile(bhatSummary$maxBhat, probs = 0.95, na.rm = TRUE)
+#)
+# max_Bhattacharyya 0.75 = 9.183693
+# max_Bhattacharyya 0.90 = 15.59092
+# max_Bhattacharyya 0.95 = 21.77456
+# quantile(bhatSummary$medianBhat, probs = 0.95, na.rm = TRUE) = 5.723137
+
+set.seed(321)
+
 df_invasion_filtered <- df_invasion[ # Filter out incomplete cases
   stats::complete.cases(
     df_invasion[, potential_predictors]
@@ -2509,18 +2744,38 @@ df_invasion_filtered <- df_invasion[ # Filter out incomplete cases
     Specieslvl = stringr::word(Species, 1, 2)
   ) %>%
   dplyr::filter(
-    as.numeric(Biome) <= 12
+    as.numeric(Biome) <= 12,
+    Bhattacharyya <= max_Bhattacharyya # New: limit both, presences and pseudo-absences by max_Bhattacharyya
   ) %>%
   dplyr::distinct( # Drop unclear subspecies
     dplyr::across(-Species),
     .keep_all = TRUE
   ) %>%
   dplyr::group_by(Species, Invaded) %>% # Limit to 1000 pseudo-absences per species
-  dplyr::slice_min(order_by = Bhattacharyya, n = 1000) %>%
-  dplyr::group_by(Species) %>% # Demand a min of 5 pseudo-absences per species
-  dplyr::filter(sum(Invaded == 0, na.rm = TRUE) >= 5) %>%
+  dplyr::group_modify(
+    ~ {
+      if (.y$Invaded == 0) {
+        dplyr::slice_sample(.x, n = min(nrow(.x), 1000))
+        } else {.x}
+      }
+    ) %>%  
+  #dplyr::slice_min(order_by = Bhattacharyya, n = 1000) %>%
+  # Bernoulli sampling
+  #dplyr::group_modify(~ {if (.y$Invaded == 0) {dplyr::slice_sample(.x, n = min(nrow(.x), 10000), weight_by = 1 / sqrt(rank(.x$Bhattacharyya)))} else {.x}}) %>%
+  dplyr::ungroup() %>%
+  dplyr::group_by(Species) %>% # Demand a min of 3 presences/abscences per species
+  dplyr::filter(sum(Invaded == 0, na.rm = TRUE) >= 3) %>%
+  dplyr::filter(sum(Invaded == 1, na.rm = TRUE) >= 3) %>%
   dplyr::ungroup()
-  
+
+sample_sizes <- df_invasion_filtered %>%
+  dplyr::count(Species, Invaded) %>%
+  tidyr::pivot_wider(
+    names_from = Invaded,
+    values_from = n,
+    values_fill = 0,
+    names_prefix = "Invaded_"
+  )
 
 num_samples <- df_invasion_filtered %>%
   dplyr::group_by(Species, Invaded) %>%
@@ -2596,12 +2851,21 @@ predictors <- c(predictors_base, predictors_hypothesis)
 predictors_check <- c(predictors_base, predictors_hypothesis_check)
 
 frml_base <- make_formula(predictors_base, biome = TRUE)
+frml_focal <- make_formula(predictors_hypothesis, biome = FALSE)
 frml_full <- make_formula(predictors, biome = TRUE)
 frml_full_check <- make_formula(predictors_check, biome = TRUE)
 
 # Direct comparison of full model to baseline (background)
 mod_base <- mgcv::gam(
   frml_base,
+  data = df_mod,
+  method = "ML",
+  family = binomial("logit"),
+  weights = weight
+)
+
+mod_focal <- mgcv::gam(
+  frml_focal,
   data = df_mod,
   method = "ML",
   family = binomial("logit"),
@@ -2625,6 +2889,7 @@ mod_full_check <- mgcv::gam(
 )
 
 ecospat::ecospat.adj.D2.glm(mod_base)
+ecospat::ecospat.adj.D2.glm(mod_focal)
 ecospat::ecospat.adj.D2.glm(mod_full)
 ecospat::ecospat.adj.D2.glm(mod_full_check)
 anova(mod_base, mod_full, test = "Chisq")
@@ -2654,63 +2919,74 @@ mgcv::gam.check(mod_full_reml)
 mgcv::concurvity(mod_full_reml)
 
 # Method 1: Permutation importance----------------------------------------------
-set.seed(42)
-cv_folds <- sample(rep(1:5, length.out = length(unique(df_mod$Species))))
-names(cv_folds) <- unique(df_mod$Species)
+f_df_d2_pred <- file.path(dir_imed, "df_pred_d2_predictors.csv")
 
-cv_perm_importance <- function(p) {
-  fold_id <- cv_folds[as.character(df_mod$Species)]
-  loss_difference <- lapply(
-    X = 1:5,
-    FUN = function(k) {
-      train <- df_mod[fold_id != k, , drop = FALSE]
-      test <- df_mod[fold_id == k, , drop = FALSE]
-      
-      mod <- mgcv::gam(
-        frml_full,
-        data = train,
-        method = "REML",
-        family = stats::binomial("logit"),
-        weights = weight
-      )
-      
-      pred <- stats::predict(
-        mod,
-        newdata = test,
-        type = "response"
-      )
-      
-      test_rand <- test %>%
-        dplyr::mutate("{p}" := sample(.data[[p]]))
-      
-      pred_rand <- stats::predict(mod, newdata = test_rand, type = "response")
-      
-      eps <- 1e-15
-      loss <- -sum(
-        test$weight * (
-          test$Invaded * log(pmax(pred, eps)) +
-            (1 - test$Invaded) * log(pmax(1 - pred, eps))
-        )
-      ) / sum(test$weight)
-      
-      loss_rand <- -sum(
-        test$weight * (
-          test$Invaded * log(pmax(pred_rand, eps)) +
-            (1 - test$Invaded) * log(pmax(1 - pred_rand, eps))
-        )
-      ) / sum(test$weight)
-      
-      loss_rand - loss
-    }
-  )
+if (file.exists(f_df_d2_pred) & !recompute) {
+  df_pred_d2_predictors <- read.csv(f_df_d2_pred)
+} else {
+  set.seed(42)
+  cv_folds <- sample(rep(1:5, length.out = length(unique(df_mod$Species))))
+  names(cv_folds) <- unique(df_mod$Species)
   
-  mean(unlist(loss_difference))
-}
-
-df_pred_d2_predictors <- data.frame()
-pb <- progress::progress_bar$new(total = length(predictors) + 1)
-for (i in 1:(length(predictors) + 1)) {
-  if (i > length(predictors)) {
+  cv_perm_importance <- function(p) {
+    fold_id <- cv_folds[as.character(df_mod$Species)]
+    loss_difference <- lapply(
+      X = 1:5,
+      FUN = function(k) {
+        train <- df_mod[fold_id != k, , drop = FALSE]
+        test <- df_mod[fold_id == k, , drop = FALSE]
+        
+        mod <- mgcv::gam(
+          frml_full,
+          data = train,
+          method = "REML",
+          family = stats::binomial("logit"),
+          weights = weight
+        )
+        
+        pred <- stats::predict(
+          mod,
+          newdata = test,
+          type = "response"
+        )
+        
+        eps <- 1e-15
+        loss <- -sum(
+          test$weight * (
+            test$Invaded * log(pmax(pred, eps)) +
+              (1 - test$Invaded) * log(pmax(1 - pred, eps))
+          )
+        ) / sum(test$weight)
+        
+        lapply(
+          X = 1:30,
+          FUN = function(i) {
+            test_rand <- test %>%
+              dplyr::mutate("{p}" := sample(.data[[p]]))
+            
+            pred_rand <- stats::predict(mod, newdata = test_rand, type = "response")
+            
+            loss_rand <- -sum(
+              test$weight * (
+                test$Invaded * log(pmax(pred_rand, eps)) +
+                  (1 - test$Invaded) * log(pmax(1 - pred_rand, eps))
+              )
+            ) / sum(test$weight)
+            
+            loss_rand - loss
+          }
+        ) %>%
+          unlist()
+      }
+    )
+    
+    mean(unlist(loss_difference))
+  }
+  
+  df_pred_d2_predictors <- data.frame()
+  pb <- progress::progress_bar$new(total = length(predictors) + 1)
+  for (i in 1:(length(predictors) + 1)) {
+    if (i > length(predictors)) {
       p <- "Biome"
       frml_p <- as.formula("Invaded ~ Biome")
       frml_d <- make_formula(predictors, biome = FALSE)
@@ -2719,69 +2995,67 @@ for (i in 1:(length(predictors) + 1)) {
       frml_p <- make_formula(p, biome = FALSE)
       frml_d <- make_formula(predictors[-i], biome = TRUE)
     }
-  
-  df_rand <- df_mod %>%
-    dplyr::mutate(
-      "{p}" := sample(.data[[p]])
+    
+    df_rand <- df_mod %>%
+      dplyr::mutate(
+        "{p}" := sample(.data[[p]])
+      )
+    
+    # Permutation importance
+    mod_r <- mgcv::gam(
+      frml_full,
+      data = df_rand,
+      method = "REML",
+      family = stats::binomial("logit"),
+      weights = weight
     )
-  
-  # Permutation importance
-  mod_r <- mgcv::gam(
-    frml_full,
-    data = df_rand,
-    method = "REML",
-    family = stats::binomial("logit"),
-    weights = weight
+    adjD2_rand <- ecospat::ecospat.adj.D2.glm(mod_r)
+    
+    # Drop-one deviance
+    mod_d <- mgcv::gam(
+      frml_d,
+      data = df_mod,
+      method = "REML",
+      family = stats::binomial("logit"),
+      weights = weight
     )
-  adjD2_rand <- ecospat::ecospat.adj.D2.glm(mod_r)
-  
-  # Drop-one deviance
-  mod_d <- mgcv::gam(
-    frml_d,
-    data = df_mod,
-    method = "REML",
-    family = stats::binomial("logit"),
-    weights = weight
-  )
-  adjD2_drop <- ecospat::ecospat.adj.D2.glm(mod_d)
-  
-  # Single explained deviance
-  mod_p <- mgcv::gam(
-    frml_p,
-    data = df_rand,
-    family = stats::binomial("logit"),
-    weights = weight
+    adjD2_drop <- ecospat::ecospat.adj.D2.glm(mod_d)
+    
+    # Single explained deviance
+    mod_p <- mgcv::gam(
+      frml_p,
+      data = df_mod,
+      family = stats::binomial("logit"),
+      weights = weight
     )
-  adjD2_single <- ecospat::ecospat.adj.D2.glm(mod_p)
-  
-  df_pred_d2_predictors <- rbind(
-    df_pred_d2_predictors,
-    data.frame(
-      Predictor = p,
-      Delta_rand_adjD2 = adjD2_full - adjD2_rand,
-      Delta_drop_adjD2 = adjD2_full - adjD2_drop,
-      Delta_cv_log_loss = cv_perm_importance(p),
-      single_adjD2 = adjD2_single
+    adjD2_single <- ecospat::ecospat.adj.D2.glm(mod_p)
+    
+    df_pred_d2_predictors <- rbind(
+      df_pred_d2_predictors,
+      data.frame(
+        Predictor = p,
+        Delta_rand_adjD2 = adjD2_full - adjD2_rand,
+        Delta_drop_adjD2 = adjD2_full - adjD2_drop,
+        Delta_cv_log_loss = cv_perm_importance(p),
+        single_adjD2 = adjD2_single
+      )
     )
-  )
-  gc()
-  pb$tick()
+    gc()
+    pb$tick()
+  }
+  rm(pb)
+  
+  write.csv(df_pred_d2_predictors, file = f_df_d2_pred, row.names = FALSE)
 }
-rm(pb)
 
 df_pred_d2 <- rbind(
   df_pred_d2_predictors %>%
     dplyr::mutate(
       Partition = factor(
-        ifelse(Predictor %in% predictors_base, "Baseline", "Theory"),
-        levels = c("Baseline", "Theory", "Shared", "Unexplained")
-      ),
-      Predictor = sapply(
-        Predictor,
-        function(x) trimws(sub("log", "", gsub("([A-Z])", " \\1", x)))
+        ifelse(Predictor %in% predictors_hypothesis, "Focal", "Baseline"),
+        levels = c("Baseline", "Focal", "Shared", "Unexplained")
       )
-    ) %>%
-    dplyr::arrange(Partition, dplyr::desc(Delta_rand_adjD2)),
+    ),
   data.frame(
     Predictor = c("Shared", "Unexplained"),
     Delta_rand_adjD2 = c(
@@ -2797,20 +3071,23 @@ df_pred_d2 <- rbind(
 ) %>%
   dplyr::mutate(
     Predictor = factor(Predictor, levels = Predictor)
-  )
+  ) %>%
+  dplyr::arrange(Partition, dplyr::desc(Delta_rand_adjD2))
+
+save_deviance_table(df_pred_d2, file.path(dir_tab_online, "deviance_table.tex"))
 
 # Plot permutation importance version of deviance "partitioning"
 plot_cols <- colorspace::qualitative_hcl(
   nrow(df_pred_d2) - 2,
   palette = "Dark 3"
 ) %>%
+  stats::setNames(df_pred_d2_predictors$Predictor) %>%
   c(
-    Shared = "grey70",
-    Unexplained = "grey90"
-  ) %>%
-  stats::setNames(df_pred_d2$Predictor)
+    Shared = "grey50",
+    Unexplained = NA #"grey90"
+  )
 
-partition_cols <- c("gray50", "black", "gray70", "gray90")
+partition_cols <- c("gray70", "black", "gray50", "gray90")
 
 df_partition <- df_pred_d2 %>%
   dplyr::group_by(Partition) %>%
@@ -2823,7 +3100,10 @@ df_partition <- df_pred_d2 %>%
   )
 
 df_predictor <- df_pred_d2 %>%
-  dplyr::mutate(ring = 2)
+  dplyr::mutate(
+    ring = 2,
+    Predictor = factor(Predictor, levels = Predictor)
+    )
 
 gg_pie <- ggplot2::ggplot() +
   ggplot2::geom_col(
@@ -2858,7 +3138,17 @@ gg_pie <- ggplot2::ggplot() +
   ggplot2::scale_fill_manual(
     values = plot_cols,
     breaks = setdiff(names(plot_cols), c("Shared", "Unexplained")),
-    name = "Predictor"
+    name = "Predictor",
+    labels = c(
+      "logBhattacharyya" = "Climate similarity",
+      "logGDP" = "GDP",
+      "logConnAreaRatio" = "Connected area",
+      "logCorrectedRichnessRatio" = "Species richness",
+      "logSamplingEffort" = "Sampling effort",
+      "logRoadDensity" = "Road density",
+      "Biome" = "Biome",
+      "climateVelocityRank" = "Climate velocity"
+    )
   ) +
   ggplot2::guides(
     fill = ggplot2::guide_legend(
@@ -2878,6 +3168,7 @@ gg_pie <- ggplot2::ggplot() +
     axis.text.x = ggplot2::element_blank(),
     axis.text.y = ggplot2::element_blank(),
     panel.grid.major = ggplot2::element_blank(),
+    panel.grid.minor = ggplot2::element_blank(),
     plot.margin = ggplot2::margin(-30, -30, 0, -30),
     legend.spacing.y = ggplot2::unit(1, "pt")
     )
@@ -3019,8 +3310,8 @@ deviance_full <- stats::deviance(models[[subset_name(predictors_hypothesis)]])
 
 df_deviance <- data.frame(
   Component = factor(
-    c("Baseline", "Theory", "Unexplained"),
-    levels = c("Unexplained", "Theory", "Baseline")
+    c("Baseline", "Focal", "Unexplained"),
+    levels = c("Unexplained", "Focal", "Baseline")
     ),
   Deviance = c(
     deviance_null - deviance_baseline,
@@ -3047,17 +3338,21 @@ gg_shares <- ggplot2::ggplot(
     linewidth = 0.5
   ) +
   ggplot2::labs(x = NULL, y = "Proportion of total deviance", fill = NULL) +
-  ggplot2::theme_minimal() +
+  ggplot2::theme_minimal(base_size = 12) +
   ggplot2::theme(
     axis.text.x = ggplot2::element_blank(),
     #axis.text.y = ggplot2::element_blank(),
     #axis.ticks.y = ggplot2::element_blank(),
-    legend.position = "bottom"
+    legend.position = "bottom",
+    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 12),
+    axis.title.y = ggplot2::element_text(size = 12, face = "bold"),
+    legend.text = ggplot2::element_text(size = 12)
   ) +
   ggplot2::scale_fill_manual(
     values = c(
       Baseline = "grey60",
-      Theory = "grey30",
+      Focal = "grey30",
       Unexplained = "white"
     )
   )
@@ -3084,9 +3379,17 @@ gg_increments <- ggplot2::ggplot(
     y = "Share of incremental explained deviance",
     fill = NULL
   ) +
-  ggplot2::theme_bw() +
+  ggplot2::scale_fill_manual(
+    values = c("Unique" = "#2E86AB", "Shared" = "#A23B72")
+    ) +
+  ggplot2::theme_bw(base_size = 12) +
   ggplot2::theme(
-    legend.position = "bottom"
+    legend.position = "bottom",
+    axis.text.x = ggplot2::element_text(size = 12),
+    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 12),
+    axis.title.y = ggplot2::element_text(size = 12, face = "bold"),
+    legend.text = ggplot2::element_text(size = 12)
   )
 
 gg_combined <- gg_shares + gg_increments +
@@ -3094,7 +3397,8 @@ gg_combined <- gg_shares + gg_increments +
     widths = c(1, 4)
   ) +
   patchwork::plot_annotation(
-    tag_levels = "a"
+    tag_levels = "a",
+    tag_suffix = ""
   )
 
 safe_figure("CommonalityAnalysis", plot = gg_combined, width = 8, height = 5)
@@ -3127,10 +3431,15 @@ response_labeller <- function(x) {
 
 frml_bi <- make_formula(predictors, biome = FALSE)
 dir_plots <- file.path(dir_fig, "invasion_prob_by_biome")
+permutation_drop <- FALSE # Set TRUE to get delta D2 as information destruction, else it will be predictor-drop delta
 if(!dir.exists(dir_plots)) {
   dir.create(dir_plots, showWarnings = FALSE)
 }
 plot_list <- list()
+plot_list_focal <- list()
+plot_dfs <- list()
+i <- 1
+conditional_pred <- FALSE
 for (bi in sort(unique(df_mod$Biome))) {
   w <- subset(df_mod, Biome == bi) %>%
     dplyr::group_by(Species, Invaded) %>%
@@ -3166,81 +3475,149 @@ for (bi in sort(unique(df_mod$Biome))) {
   # Get delta D2 for each predictor
   delta_adjD2_p <- c()
   for (p in predictors) {
-    adjD2_rand_c <- c()
-    for (i in 1:100) {
-      set.seed(i)
-      df_rand <- df_bi %>%
-        dplyr::mutate(
-          "{p}" := sample(.data[[p]])
+    if (permutation_drop) {
+      adjD2_rand_c <- c()
+      for (i in 1:100) {
+        set.seed(i)
+        df_rand <- df_bi %>%
+          dplyr::mutate(
+            "{p}" := sample(.data[[p]])
+          )
+        
+        mod_rand <- mgcv::gam(
+          frml_bi,
+          data = df_rand,
+          method = "REML",
+          family = stats::binomial("logit"),
+          weights = weight
         )
-      
-      mod_rand <- mgcv::gam(
-        frml_bi,
-        data = df_rand,
+        adjD2_rand_c <- c(adjD2_rand_c, ecospat::ecospat.adj.D2.glm(mod_rand))
+      }
+      adjD2_rand <- mean(adjD2_rand_c, na.rm = TRUE)
+      delta_adjD2_p <- c(delta_adjD2_p, adjD2_bi - adjD2_rand)
+    } else {
+      predictors_dropped <- predictors[which(predictors != p)]
+      frml_rnd <- make_formula(predictors_dropped, biome = FALSE)
+      mod_drop <- mgcv::gam(
+        frml_rnd,
+        data = df_bi,
         method = "REML",
         family = stats::binomial("logit"),
         weights = weight
       )
-      adjD2_rand_c <- c(adjD2_rand_c, ecospat::ecospat.adj.D2.glm(mod_rand))
+      adjD2_drop <- ecospat::ecospat.adj.D2.glm(mod_drop)
+      delta_adjD2_p <- c(delta_adjD2_p, adjD2_bi - adjD2_drop)
     }
-    adjD2_rand <- mean(adjD2_rand_c, na.rm = TRUE)
-    delta_adjD2_p <- c(delta_adjD2_p, adjD2_bi - adjD2_rand)
   }
+  
   names(delta_adjD2_p) <- predictors
   
-  # Plot smooth responses
-  pred_dfs <- list()
-  for (p in predictors) {
-    nd <- data.frame(
-      matrix(
-        ncol = length(predictors),
-        nrow = 200
+  if (conditional_pred) {
+    # Plot contidional smooth responses
+    pred_dfs <- list()
+    for (p in predictors) {
+      nd <- data.frame(
+        matrix(
+          ncol = length(predictors),
+          nrow = 200
+        )
       )
-    )
-    
-    names(nd) <- predictors
-    
-    # Set all variables to median
-    for (v in predictors) {
-      nd[[v]] <- median(df_bi[[v]], na.rm = TRUE)
+
+      names(nd) <- predictors
+
+      # Set all variables to median
+      for (v in predictors) {
+        nd[[v]] <- median(df_bi[[v]], na.rm = TRUE)
+      }
+
+      nd[[p]] <- seq(
+        min(df_bi[[p]], na.rm = TRUE),
+        max(df_bi[[p]], na.rm = TRUE),
+        length.out = 200
+      )
+
+      pred <- predict(
+        mod_bi,
+        newdata = nd,
+        type = "lpmatrix"#"link",
+        #se.fit = TRUE
+      )
+      b <- coef(mod_bi)
+      V <- vcov(mod_bi)
+      sim_b <- MASS::mvrnorm(n = 2000, mu = b, Sigma = V)
+      fit_sim <- plogis(sim_b %*% t(pred))
+      fit_mean <- colMeans(fit_sim)
+      fit_low <- apply(fit_sim, 2, quantile, 0.025)
+      fit_high <- apply(fit_sim, 2, quantile, 0.975)
+
+      d <- data.frame(
+        predictor = p,
+        x = nd[[p]],
+        fit = fit_mean,
+        lower = fit_low,
+        upper = fit_high,
+        deltaD2 = delta_adjD2_p[p]
+      )
+
+      pred_dfs[[p]] <- d
     }
-    
-    nd[[p]] <- seq(
-      min(df_bi[[p]], na.rm = TRUE),
-      max(df_bi[[p]], na.rm = TRUE),
-      length.out = 200
-    )
-    
-    pred <- predict(
-      mod_bi,
-      newdata = nd,
-      type = "lpmatrix"#"link",
-      #se.fit = TRUE
-    )
-    b <- coef(mod_bi)
-    V <- vcov(mod_bi)
-    sim_b <- MASS::mvrnorm(n = 2000, mu = b, Sigma = V)
-    fit_sim <- plogis(sim_b %*% t(pred))
-    fit_mean <- colMeans(fit_sim)
-    fit_low <- apply(fit_sim, 2, quantile, 0.025)
-    fit_high <- apply(fit_sim, 2, quantile, 0.975)
-    
-    d <- data.frame(
-      predictor = p,
-      x = nd[[p]],
-      fit = fit_mean,
-      lower = fit_low,
-      upper = fit_high,
-      deltaD2 = delta_adjD2_p[p]
-    )
-    
-    pred_dfs[[p]] <- d
+  } else {
+    # Plot univariate response curves
+    pred_dfs <- list()
+    for (p in predictors) {
+      # Fit GAM with only the focal predictor
+      frml_p <- make_formula(p, biome = FALSE)
+      mod_p <- mgcv::gam(
+        frml_p,
+        data = df_bi,
+        method = "REML",
+        family = stats::binomial("logit"),
+        weights = weight
+      )
+      
+      # Prediction grid
+      nd <- data.frame(
+        x = seq(
+          min(df_bi[[p]], na.rm = TRUE),
+          max(df_bi[[p]], na.rm = TRUE),
+          length.out = 200
+        )
+      )
+      
+      names(nd) <- p
+      
+      pred <- predict(
+        mod_p,
+        newdata = nd,
+        type = "link",
+        se.fit = TRUE,
+        unconditional = TRUE
+      )
+      
+      fit <- plogis(pred$fit)
+      fit_low <- plogis(pred$fit - 1.96 * pred$se.fit)
+      fit_high <- plogis(pred$fit + 1.96 * pred$se.fit)
+      
+      d <- data.frame(
+        predictor = p,
+        x = nd[[p]],
+        fit = as.numeric(fit),
+        lower = fit_low,
+        upper = fit_high,
+        deltaD2 = delta_adjD2_p[p]
+      )
+      
+      pred_dfs[[p]] <- d
+    }
   }
   
+  # Combine predicted values
   plot_df <- dplyr::bind_rows(pred_dfs)
+  plot_dfs[[bi]] <- plot_df
   
   # Plot response shapes
   pred_plots <- list()
+  pred_plots_curve <- list()
   for (p in predictors) {
     d <- plot_df %>%
       dplyr::filter(predictor == p)
@@ -3336,14 +3713,18 @@ for (bi in sort(unique(df_mod$Biome))) {
       patchwork::plot_layout(
         widths = c(12, 1)
       )
+    pred_plots_curve[[p]] <- p_curve
   }
   # --- Combine all predictors vertically ---
-  p_final <- patchwork::wrap_plots(
-    pred_plots,
-    ncol = 1
-  ) +
+  p_final <- patchwork::wrap_plots(pred_plots, ncol = 1) +
     patchwork::plot_annotation(
-      title = paste0(bi, " | adj. D² = ", round(adjD2_bi, 3))
+      title = bquote(
+        bold(
+          .(letters[i]) ~ .(bi) ~ "|" ~
+          D[italic("adj.")]^2 ~ "=" ~ .(round(adjD2_bi, 3)) ~
+          "|" ~ N ~ "=" ~ .(nobs(mod_bi))
+          )
+        )
     ) &
     ggplot2::theme(
       plot.title = ggplot2::element_text(
@@ -3352,20 +3733,62 @@ for (bi in sort(unique(df_mod$Biome))) {
       )
     )
   
+  p_focal <- patchwork::wrap_plots(
+    pred_plots_curve[which(names(pred_plots_curve) %in% predictors_hypothesis)],
+    ncol = 1
+  ) +
+    patchwork::plot_annotation(
+      title = bi
+    ) &
+    ggplot2::theme(
+      plot.title = ggplot2::element_text(
+        size = 8,
+        hjust = 0.5,
+        face = "bold"
+      )
+    )
+  
   plot_list[[bi]] <- p_final
+  plot_list_focal[[bi]] <- p_focal
   bi_idx <- which(levels(df_mod$Biome) == bi)
   
+  prefix <- ifelse(conditional_pred, "Response_", "Response_univ_")
+  
   ggplot2::ggsave(
-    filename = file.path(dir_plots, paste0("Response_", bi_idx, ".svg")),
-    plot = p_final, width = 3, height = 7
+    filename = file.path(dir_plots, paste0(prefix, bi_idx, ".svg")),
+    plot = p_final, width = 3, height = 11
     )
   ggplot2::ggsave(
-    filename = file.path(dir_plots, paste0("Response_", bi_idx, ".pdf")),
-    plot = p_final, width = 3, height = 7
+    filename = file.path(
+      dir_fig_online, "suppl_files", paste0(prefix, bi_idx, ".pdf")
+      ),
+    plot = p_final, width = 3, height = 11
   )
+  i <- i + 1
 }
 
-plot_list[[1]]
+plot_list_focal[[1]]
+
+combined_responses <- cowplot::plot_grid(
+  plot_list_focal[[1]],
+  plot_list_focal[[4]],
+  plot_list_focal[[8]],
+  gg_pie,
+  nrow = 1,
+  rel_widths = c(1, 1, 1, 2),
+  labels = c("a", "b", "c", "d"),
+  label_size = 12,
+  label_fontface = "bold",
+  align = "h"
+)
+
+safe_figure(
+  "CombinedResponsesPartitioning",
+  plot = combined_responses,
+  width = 360,
+  height = 180,
+  units = "mm"
+)
 
 
 #>=============================================================================<
