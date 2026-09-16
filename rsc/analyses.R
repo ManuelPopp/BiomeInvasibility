@@ -13,6 +13,7 @@ library("stringr")
 library("boot")
 library("rsdd")
 library("ggplot2")
+library("ggh4x")
 library("gghalves") # pak::pak("erocoar/gghalves")
 library("patchwork")
 library("viridis")
@@ -206,7 +207,7 @@ safe_figure <- function(name, plot, ...) {
       args
     )
   )
-  cat("\nSaved figure to:")
+  cat("\nSaved figure to: ")
   cat(file.path(dir_fig, paste0(name, ".svg")))
   do.call(
     ggplot2::ggsave,
@@ -477,6 +478,41 @@ save_deviance_table <- function(x, file = "deviance_table.tex") {
     c(header, rows, footer),
     con = file
   )
+}
+
+
+## Label predictor names in response curve plots
+response_labeller <- function(x) {
+  is_log <- grepl("^log", x)
+  x <- gsub("^log", "", x)
+  x <- gsub("([a-z])([A-Z])", "\\1 \\2", x)
+  x <- gsub("Conn", "Connected", x)
+  x <- gsub("Rank", "(rank-normalised)", x)
+  x <- trimws(x)
+  x <- paste0(
+    toupper(substr(x, 1, 1)),
+    substr(x, 2, nchar(x))
+  )
+  x <- ifelse(
+    is_log,
+    paste0(x, " (log-scaled)"),
+    x
+  )
+  x
+}
+
+
+response_labeller2 <- function(x) {
+  x <- gsub("^log", "", x)
+  x <- gsub("([a-z])([A-Z])", "\\1 \\2", x)
+  x <- gsub("Conn", "Connected", x)
+  x <- gsub("Rank", "", x)
+  x <- trimws(x)
+  x <- paste0(
+    toupper(substr(x, 1, 1)),
+    substr(x, 2, nchar(x))
+  )
+  x
 }
 
 
@@ -1473,6 +1509,7 @@ values(remerge) <- biomes %>%
 
 polygons_sf <- sf::st_as_sf(remerge) %>%
   sf::st_transform(crs = "epsg:8857")
+
 gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
   ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
   ggplot2::geom_sf(ggplot2::aes(fill = species_count)) +
@@ -1482,7 +1519,7 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
     option = "viridis",
     na.value = "grey90"
   ) +
-  ggplot2::theme_minimal() +
+  ggplot2::theme_minimal(base_size = 7) +
   ggplot2::theme(
     legend.position = "bottom",
     legend.key.width = ggplot2::unit(1, "cm"),
@@ -1495,7 +1532,7 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
 
 safe_figure(
   "SInAS_donors_and_receivers", plot = gg_dr,
-  width = 6, height = 7 # 13 and 3 for two-column version
+  width = 180, height = 210, units = "mm"
   )
 
 polygons_sf$sp_fraction <- pmin(
@@ -1517,18 +1554,25 @@ gg_dr_norm <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
     labels = scales::label_number(accuracy = 0.01),
     na.value = "grey90",
   ) +
-  ggplot2::theme_minimal(base_size = 10) +
+  ggplot2::guides(
+    fill = ggplot2::guide_colourbar(
+      title.position = "left",
+      barwidth = ggplot2::unit(12, "cm"),
+      barheight = ggplot2::unit(0.4, "cm")
+    )
+  ) +
+  ggplot2::theme_minimal(base_size = 7) +
   ggplot2::theme(
     legend.position = "top",
     strip.background = ggplot2::element_blank(),
-    strip.text = ggplot2::element_text(face = "bold", size = 12),
-    legend.key.height = ggplot2::unit(1.0, "cm"),
-    legend.key.width = ggplot2::unit(3.0, "cm"),
+    strip.text = ggplot2::element_text(face = "bold", size = 7),
+    #legend.key.height = ggplot2::unit(1.0, "cm"),
+    #legend.key.width = ggplot2::unit(3.0, "cm"),
     axis.text = ggplot2::element_blank(),
     axis.ticks = ggplot2::element_blank(),
     axis.title = ggplot2::element_blank(),
-    legend.title = ggplot2::element_text(size = 12),
-    legend.text = ggplot2::element_text(size = 12),
+    legend.title = ggplot2::element_text(size = 7, vjust = 0.5),
+    legend.text = ggplot2::element_text(size = 7),
     legend.margin = ggplot2::margin(t = 0, r = 0, b = 0, l = -5),
     panel.grid.minor = ggplot2::element_blank(),
     plot.margin = ggplot2::margin(0, 0, 0, 0)
@@ -1536,7 +1580,7 @@ gg_dr_norm <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
 
 safe_figure(
   "SInAS_donors_and_receivers_norm", plot = gg_dr_norm,
-  width = 6, height = 7 # 13 and 3 for two-column version
+  width = 180, height = 210, units = "mm"
 )
 
 
@@ -1721,23 +1765,25 @@ gg_area <- ggplot2::ggplot(
     y = expression("Area in " * 10^3 * " km"^2 * " or estimated number or species"),
     x = "Biome patch status"
   ) +
-  ggplot2::theme_classic(base_size = 10) +
+  ggplot2::theme_classic(base_size = 7) +
   ggplot2::theme(
     legend.position = "none",
     strip.background = ggplot2::element_blank(), # ggplot2::element_rect(fill = "lightgray"),
-    strip.text = ggplot2::element_text(face = "bold", size = 12),
-    axis.title.x = ggplot2::element_text(size = 12),
-    axis.title.y = ggplot2::element_text(size = 12),
-    axis.text.x = ggplot2::element_text(size = 12),
-    axis.text.y = ggplot2::element_text(size = 12),
-    legend.title = ggplot2::element_text(size = 12),
+    strip.text = ggplot2::element_text(face = "bold", size = 7),
+    axis.title.x = ggplot2::element_text(size = 7),
+    axis.title.y = ggplot2::element_text(size = 7),
+    axis.text.x = ggplot2::element_text(size = 7),
+    axis.text.y = ggplot2::element_text(size = 7),
+    legend.title = ggplot2::element_text(size = 7),
     panel.grid.minor = ggplot2::element_blank()
   ) +
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(
-      x = 1.5, label = label, vjust = ifelse(place_low, 3.0, 1.25)
-      )
+      x = 1.5, label = label, vjust = ifelse(place_low, 6.5, 1.5),
+      size = 7
+      ),
+    size.unit = "pt"
     ) +
   # Boxplots are shown on a logarithmic scale to accommodate the large dynamic range of values.
   #ggplot2::coord_transform(y = "log10") +
@@ -1771,7 +1817,7 @@ gg_area <- ggplot2::ggplot(
 
 safe_figure(
   "MaxAreaRichnessBoxplot", plot = gg_area,
-  width = 3.3 * length(metrics), height = 4
+  width = 180, height = 73, units = "mm"
 )
 
 
@@ -1794,7 +1840,8 @@ gg_a <- gg_dr_norm +
     ggplot2::aes(x = -Inf, y = Inf, label = label),
     hjust = -1,
     vjust = 1,
-    size = 5,
+    size = 7,
+    size.unit = "pt",
     fontface = "bold"
   )
 gg_b <- gg_area +
@@ -1803,7 +1850,8 @@ gg_b <- gg_area +
     ggplot2::aes(x = -Inf, y = Inf, label = label),
     hjust = -1,
     vjust = 1,
-    size = 5,
+    size = 7,
+    size.unit = "pt",
     fontface = "bold"
   )
 
@@ -1815,7 +1863,7 @@ combined <- (gg_a / gg_b) +
 
 safe_figure(
   "CombinedBoxplotsAndMap", plot = combined,
-  width = 10, height = 14
+  width = 150, height = 210, units = "mm"
 )
 
 
@@ -2284,7 +2332,6 @@ for (bi in names(bi_tab)[bi_tab > 10]) {
     paste0("high (N=", summary_tab$n_high, ")")
   )
   
-  
   df_biome <- df_sPlotBiome %>%
     dplyr::filter(
       Biome == bi,
@@ -2316,26 +2363,7 @@ for (bi in names(bi_tab)[bi_tab > 10]) {
 }
 
 
-# Fit a GLMM to estimate the impact of our variables
-## Assumptions violated:
-# n <- nrow(df_sPlotBiome)
-# df_sPlotBiome$Introduced_abund <- (df_sPlotBiome$Introduced_abundance * (n - 1) + 0.5) / n
-# 
-# mod <- glmmTMB::glmmTMB(
-#   Introduced_abund ~ HumanModification + log_speciesRichnessBa + log_focalECA +
-#     (1 | Biome),
-#   family = beta_family(),
-#   data = df_sPlotBiome
-#   )
-# 
-# summary(mod)
-# performance::r2_nakagawa(mod)
-# 
-# sim <- DHARMa::simulateResiduals(mod)
-# plot(sim)
-
 # GAM per biome
-
 vars <- c(
   "log_focalECA",
   "HumanModification",
@@ -2354,6 +2382,7 @@ frml <- make_formula(
 # if(!dir.exists(file.path(dir_fig, "sPlotResponse"))) {
 #   dir.create(file.path(dir_fig, "sPlotResponse"), recursive = TRUE)
 # }
+list_standardised_effects <- list()
 subtables_tex = character(0)
 binames <- names(bi_tab[bi_tab >= 15])
 for (bi in binames) {
@@ -2366,12 +2395,27 @@ for (bi in binames) {
         rank(climate_velocity_kmpa) / (length(climate_velocity_kmpa) + 1)
       )
     )
+  
+  predictor_sd <- sdf %>%
+    dplyr::summarise(
+      dplyr::across(
+        dplyr::all_of(vars),
+        ~ stats::sd(.x, na.rm = TRUE)
+      )
+    ) %>%
+    tidyr::pivot_longer(
+      cols = dplyr::everything(),
+      names_to = "Variable",
+      values_to = "sd"
+    )
+  
   cor(sdf[vars], use = "pairwise.complete.obs")
   
   n <- sum(!is.na(sdf$Introduced_abundance))
   sdf$Introduced_abundance_logit_boundary_corrected <- qlogis(
     (sdf$Introduced_abundance * (n - 1) + 0.5) / n
   )
+  
   mod_full <- stats::glm(
     frml,
     family = fam,
@@ -2399,11 +2443,13 @@ for (bi in binames) {
       k = 0,
       biome = FALSE
     )
+    
     mod_red <- glm(
       frml_red,
       family = fam,
       data = sdf
     )
+    
     delta_aic <- AIC(mod_red) - AIC(mod_full)
     tabanova <- anova(mod_red, mod_full, test = "Chisq")
     dev <- tabanova$Deviance[2]
@@ -2421,10 +2467,24 @@ for (bi in binames) {
     dplyr::left_join(
       do.call(rbind, df_list_vars),
       by = "Variable"
-    )  %>%
+    ) %>%
+    dplyr::left_join(
+      predictor_sd,
+      by = "Variable"
+    ) %>%
+    dplyr::mutate(
+      std_estimate = estimate * sd,
+      std_ci95_low = ci95_low * sd,
+      std_ci95_high = ci95_high * sd
+    ) %>%
     dplyr::relocate(Variable)
   
   print(df_vars)
+  
+  ## Store standardised effects for plot
+  list_standardised_effects[[bi]] <- df_vars %>%
+    dplyr::filter(Variable != "(Intercept)") %>%
+    dplyr::mutate(Biome = bi)
   
   df_out <- df_vars %>%
     dplyr::filter(Variable != "(Intercept)") %>%
@@ -2452,7 +2512,6 @@ for (bi in binames) {
       p_Chisq,
       delta_aic
     )
-  
   
   rows <- apply(
     df_out,
@@ -2486,6 +2545,73 @@ writeLines(
   subtables_tex,
   file.path(dir_tab, paste("glm", nativeness_source, "subtab.tex", sep = "_"))
 )
+
+
+# Create plot
+df_stdeff <- dplyr::bind_rows(list_standardised_effects) %>%
+  dplyr::mutate(
+    Variable = dplyr::recode(
+      Variable,
+      "log_focalECA" = "Connected area",
+      "HumanModification" = "Human modification",
+      "climateVelocityRank" = "Climate velocity"
+    ),
+    Variable = factor(
+      Variable, levels = c("Climate velocity", "Human modification", "Connected area")
+      ),
+    significant = ifelse(p_Chisq < 0.05, "Significant", "Not significant")
+  )
+
+p_effects <- ggplot2::ggplot(
+  df_stdeff,
+  ggplot2::aes(
+    x = Biome,
+    y = Variable,
+    fill = std_estimate
+  )
+) +
+  ggpattern::geom_tile_pattern(
+    ggplot2::aes(pattern = significant),
+    pattern_angle = 45,
+    pattern_density = 0.45,
+    pattern_spacing = 0.1,
+    pattern_colour = "white",
+    pattern_fill = "white",
+    colour = NA,
+    linewidth = 1.5
+  ) +
+  ggpattern::scale_pattern_manual(
+    values = c(
+      "Significant" = "none",
+      "Not significant" = "stripe"
+    ),
+    guide = "none"
+  ) +
+  ggplot2::scale_fill_distiller(
+    palette = "RdBu",
+    direction = -1,
+    limits = c(-1, 1),
+    oob = scales::squish,
+    breaks = seq(-1, 1, by = 0.5),
+    name = "Standardised\ncoefficient"
+  ) +
+  ggplot2::theme_minimal(base_size = 7) +
+  ggplot2::theme(
+    legend.position = "bottom",
+    panel.grid = ggplot2::element_blank(),
+    axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 7),
+    axis.text.y = element_text(size = 7),
+    legend.title = element_text(size = 7),
+    legend.text = element_text(size = 6),
+    legend.key.height = ggplot2::unit(5, "mm"),
+    plot.margin = margin(2, 2, 2, 2)
+  )
+
+safe_figure(
+  name = "StandardisedEffects",
+  plot = p_effects,
+  width = 88, height = 75, unit = "mm"
+  )
 
 
 #>=============================================================================<
@@ -2896,13 +3022,29 @@ anova(mod_base, mod_full, test = "Chisq")
 anova(mod_full, mod_full_check, test = "Chisq") # Here, again, we see that connected area is better than just area
 
 # Deviance "partitioning"
-df_mod %>%
-  dplyr::select(dplyr::all_of(predictors)) %>%
-  stats::cor(use = "pairwise.complete.obs") %>%
-  corrplot::corrplot(
-    method = "color", type = "upper", tl.col = "black", order = "hclust",
-    col = RColorBrewer::brewer.pal(n = 8, name = "RdBu")
+if (
+  !file.exists(
+    file.path(dir_fig_online, "suppl_files", "PredictorCorrelations.pdf")
+    ) | recompute
+) {
+  pdf(
+    file = file.path(dir_fig_online, "suppl_files", "PredictorCorrelations.pdf"),
+    width = 7, height = 7
+  )
+  par(mar = c(0.1, 0.1, 0.1, 0.1))
+  df_mod %>%
+    dplyr::select(dplyr::all_of(predictors)) %>%
+    dplyr::rename_with(response_labeller) %>%
+    stats::cor(use = "pairwise.complete.obs", method = "spearman") %>%
+    corrplot::corrplot(
+      method = "color", type = "upper",
+      tl.col = "black", tl.cex = 0.7, cl.cex = 0.7,
+      order = "hclust",
+      col = RColorBrewer::brewer.pal(n = 8, name = "RdBu")
     )
+  dev.off()
+}
+
 
 mod_full_reml <- mgcv::gam(
   frml_full,
@@ -3158,25 +3300,29 @@ gg_pie <- ggplot2::ggplot() +
   ) +
   ggplot2::coord_polar(theta = "y", start = 0, clip = "off") +
   ggplot2::scale_x_continuous(limits = c(0.5, 2.5), expand = c(0, 0)) +
-  ggplot2::theme_minimal() +
+  ggplot2::theme_minimal(base_size = 7) +
   ggplot2::theme(
     legend.position = "bottom",
     aspect.ratio = 1,
     legend.title = ggplot2::element_blank(),
+    legend.text = ggplot2::element_text(size = 7),
+    legend.key.size = ggplot2::unit(7, "pt"),
     axis.title.x = ggplot2::element_blank(),
     axis.title.y = ggplot2::element_blank(),
     axis.text.x = ggplot2::element_blank(),
     axis.text.y = ggplot2::element_blank(),
     panel.grid.major = ggplot2::element_blank(),
     panel.grid.minor = ggplot2::element_blank(),
-    plot.margin = ggplot2::margin(-30, -30, 0, -30),
+    plot.margin = ggplot2::margin(-20, -20, -20, -20),
+    legend.margin = ggplot2::margin(t = -10, r = 5, b = 25, l = 5),
+    legend.box.spacing = ggplot2::unit(-5, "mm"),
     legend.spacing.y = ggplot2::unit(1, "pt")
     )
 
 safe_figure(
   "PermutationImportanceD2Pie",
   plot = gg_pie,
-  width = 6, height = 6
+  width = 88, height = 88, units = "mm"
   )
 
 # Method 2: Commonality coefficients of incremental explained deviance----------
@@ -3259,7 +3405,7 @@ fit_subset <- function(formula) {
   )
 }
 
-models <- lapply(X = model_formulas,FUN = fit_subset)
+models <- lapply(X = model_formulas, FUN = fit_subset)
 names(models) <- names(model_formulas)
 
 adjD2s <- lapply(X = models, FUN = ecospat::ecospat.adj.D2.glm)
@@ -3325,7 +3471,6 @@ gg_shares <- ggplot2::ggplot(
   df_deviance,
   ggplot2::aes(x = 0, y = Share, fill = Component)
 ) +
-  ggplot2::geom_col(width = 0.5) +
   ggplot2::scale_y_continuous(
     breaks = c(0, cumsum(df_deviance$Share)),
     labels = scales::label_percent(),
@@ -3335,19 +3480,20 @@ gg_shares <- ggplot2::ggplot(
   ggplot2::geom_col(
     width = 0.5,
     colour = "black",
-    linewidth = 0.5
+    linewidth = 0.25
   ) +
   ggplot2::labs(x = NULL, y = "Proportion of total deviance", fill = NULL) +
-  ggplot2::theme_minimal(base_size = 12) +
+  ggplot2::theme_minimal(base_size = 7) +
   ggplot2::theme(
     axis.text.x = ggplot2::element_blank(),
     #axis.text.y = ggplot2::element_blank(),
     #axis.ticks.y = ggplot2::element_blank(),
     legend.position = "bottom",
-    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
-    axis.text.y = ggplot2::element_text(size = 12),
-    axis.title.y = ggplot2::element_text(size = 12, face = "bold"),
-    legend.text = ggplot2::element_text(size = 12)
+    legend.text = ggplot2::element_text(size = 7),
+    legend.key.size = ggplot2::unit(7, "pt"),
+    axis.title.x = ggplot2::element_text(size = 7, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 7),
+    axis.title.y = ggplot2::element_text(size = 7, face = "bold")
   ) +
   ggplot2::scale_fill_manual(
     values = c(
@@ -3382,52 +3528,36 @@ gg_increments <- ggplot2::ggplot(
   ggplot2::scale_fill_manual(
     values = c("Unique" = "#2E86AB", "Shared" = "#A23B72")
     ) +
-  ggplot2::theme_bw(base_size = 12) +
+  ggplot2::theme_bw(base_size = 7) +
   ggplot2::theme(
     legend.position = "bottom",
-    axis.text.x = ggplot2::element_text(size = 12),
-    axis.title.x = ggplot2::element_text(size = 12, face = "bold"),
-    axis.text.y = ggplot2::element_text(size = 12),
-    axis.title.y = ggplot2::element_text(size = 12, face = "bold"),
-    legend.text = ggplot2::element_text(size = 12)
+    axis.text.x = ggplot2::element_text(size = 7),
+    axis.title.x = ggplot2::element_text(size = 7, face = "bold"),
+    axis.text.y = ggplot2::element_text(size = 7),
+    axis.title.y = ggplot2::element_text(size = 7, face = "bold"),
+    legend.text = ggplot2::element_text(size = 7),
+    legend.key.size = ggplot2::unit(7, "pt")
   )
 
 gg_combined <- gg_shares + gg_increments +
   patchwork::plot_layout(
-    widths = c(1, 4)
+    widths = c(1, 8)
   ) +
   patchwork::plot_annotation(
     tag_levels = "a",
     tag_suffix = ""
   )
 
-safe_figure("CommonalityAnalysis", plot = gg_combined, width = 8, height = 5)
+safe_figure(
+  "CommonalityAnalysis",
+  plot = gg_combined,
+  width = 160, height = 110, units = "mm"
+  )
 
 # Fit model per biome, estimate explained deviance contributions
 # and plot response shapes
 #
 # Maybe worth a try: https://stat.ethz.ch/R-manual/R-devel/library/mgcv/html/ginla.html
-#
-#stop("With 100 repetitions per variable, this now takes forever. Consider using the existing plots.")
-
-response_labeller <- function(x) {
-  is_log <- grepl("^log", x)
-  x <- gsub("^log", "", x)
-  x <- gsub("([a-z])([A-Z])", "\\1 \\2", x)
-  x <- gsub("Conn", "Connected", x)
-  x <- gsub("Rank", "(rank-normalised)", x)
-  x <- trimws(x)
-  x <- paste0(
-    toupper(substr(x, 1, 1)),
-    substr(x, 2, nchar(x))
-  )
-  x <- ifelse(
-    is_log,
-    paste0(x, " (log-scaled)"),
-    x
-  )
-  x
-}
 
 frml_bi <- make_formula(predictors, biome = FALSE)
 dir_plots <- file.path(dir_fig, "invasion_prob_by_biome")
@@ -3728,7 +3858,7 @@ for (bi in sort(unique(df_mod$Biome))) {
     ) &
     ggplot2::theme(
       plot.title = ggplot2::element_text(
-        size = 8,
+        size = 7,
         face = "bold"
       )
     )
@@ -3742,7 +3872,7 @@ for (bi in sort(unique(df_mod$Biome))) {
     ) &
     ggplot2::theme(
       plot.title = ggplot2::element_text(
-        size = 8,
+        size = 7,
         hjust = 0.5,
         face = "bold"
       )
@@ -3767,26 +3897,124 @@ for (bi in sort(unique(df_mod$Biome))) {
   i <- i + 1
 }
 
-plot_list_focal[[1]]
 
+# Create faceted plot of example biomes
+df_focal <- dplyr::bind_rows(
+  lapply(
+    names(plot_dfs[c(1, 4, 8)]),
+    function(bi) {
+      plot_dfs[[bi]] %>%
+        dplyr::filter(predictor %in% predictors_hypothesis) %>%
+        dplyr::mutate(Biome = bi)
+    }
+  )
+) %>%
+  dplyr::mutate(
+    predictor = factor(
+      predictor,
+      levels = c(
+        "logConnAreaRatio",
+        "logCorrectedRichnessRatio",
+        "climateVelocityRank"
+        )
+      )
+    )
+
+p_focal_faceted <- ggplot2::ggplot(
+  df_focal,
+  ggplot2::aes(x = x, y = fit, colour = predictor)
+) +
+  ggplot2::geom_ribbon(
+    ggplot2::aes(
+      ymin = lower,
+      ymax = upper,
+      fill = predictor
+    ),
+    colour = NA,
+    alpha = 0.4
+  ) +
+  ggplot2::geom_line(
+    linewidth = 0.7
+  ) +
+  ggh4x::facet_grid2(
+    rows = ggplot2::vars(predictor),
+    cols = ggplot2::vars(Biome),
+    scales = "free_x",
+    independent = "x",
+    labeller = ggplot2::labeller(
+      predictor = response_labeller2
+    )
+  ) +
+  ggplot2::scale_x_continuous(
+    breaks = scales::breaks_pretty(n = 3),
+    guide = ggplot2::guide_axis(n.dodge = 1)
+  ) +
+  ggplot2::scale_y_continuous(
+    limits = c(0, 1),
+    expand = c(0, 0)
+  ) +
+  ggplot2::scale_color_manual(values = plot_cols) +
+  ggplot2::scale_fill_manual(values = plot_cols) +
+  ggplot2::labs(
+    x = NULL,
+    y = "Probability of invasion"
+  ) +
+  ggplot2::geom_text(
+    data = df_focal %>%
+      dplyr::group_by(predictor, Biome) %>%
+      dplyr::summarise(x = min(x, na.rm = TRUE), .groups = "drop") %>%
+      dplyr::mutate(
+        y = 0.98,
+        label = letters[seq_len(n())]
+      ),
+    ggplot2::aes(
+      x = -Inf,
+      y = Inf,
+      label = label
+    ),
+    colour = "black",
+    hjust = -0.5,
+    vjust = 1.5,
+    fontface = "bold",
+    size = 7,
+    size.unit = "pt"
+  ) +
+  ggplot2::theme_bw(base_size = 7) +
+  ggplot2::theme(
+    legend.position = "none",
+    strip.background = ggplot2::element_blank(),
+    strip.text = ggplot2::element_text(size = 6),#, face = "bold"),
+    panel.grid = ggplot2::element_blank(),
+    #axis.title.y = ggplot2::element_text(size = 7, unit = "pt"),
+    axis.text = ggplot2::element_text(size = 5),
+    axis.title.x = ggplot2::element_blank(),
+    plot.margin = ggplot2::margin(2, 2, 2, 2)
+  )
+
+# Create combined plot
 combined_responses <- cowplot::plot_grid(
-  plot_list_focal[[1]],
-  plot_list_focal[[4]],
-  plot_list_focal[[8]],
+  p_focal_faceted,
   gg_pie,
   nrow = 1,
-  rel_widths = c(1, 1, 1, 2),
-  labels = c("a", "b", "c", "d"),
-  label_size = 12,
+  rel_heights = c(1, 1),
+  labels = c(
+    "",
+    letters[
+      length(unique(df_focal$predictor)) * length(unique(df_focal$Biome)) + 1
+      ]
+    ),
+  label_size = 7,
   label_fontface = "bold",
+  hjust = -5,
+  vjust = 5,
   align = "h"
 )
 
 safe_figure(
   "CombinedResponsesPartitioning",
   plot = combined_responses,
-  width = 360,
-  height = 180,
+  width = 180,
+  height = 90,
   units = "mm"
 )
 
