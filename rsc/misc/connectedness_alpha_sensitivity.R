@@ -141,29 +141,57 @@ gg_area_comp <- ggplot2::ggplot(boxplot_data, aes(x = Status, y = value, fill = 
     y = expression("Area (" * 10^3 * " km"^2 * ")"),
     x = "Biome patch status"
   ) +
-  ggplot2::theme_bw() +
+  ggplot2::theme_classic(base_size = 7) +
   ggplot2::theme(
     legend.position = "none",
-    strip.background = ggplot2::element_rect(fill = "lightgray"),
-    strip.text = ggplot2::element_text(face = "bold", size = 10),
+    panel.grid = ggplot2::element_blank(),
+    strip.background = ggplot2::element_rect(colour = NA, fill = NA),
+    strip.text = ggplot2::element_text(face = "bold", size = 7),
+    axis.title.x = ggplot2::element_text(size = 7),
+    axis.title.y = ggplot2::element_text(size = 7),
+    axis.text.x = ggplot2::element_text(size = 7),
+    axis.text.y = ggplot2::element_text(size = 7),
+    legend.title = ggplot2::element_text(size = 7),
     panel.grid.minor = ggplot2::element_blank()
   ) +
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(
       x = 1.5, label = label, vjust = ifelse(place_low, 4.5, 2)
-    )
+    ),
+    size = 7, size.unit = "pt"
   ) +
-  ggplot2::scale_y_continuous(
-    breaks = c(1e-2, 1, 1e2, 1e4),
-    labels = scales::label_scientific(),
-    sec.axis = sec_axis(
-      ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
-    )
+  ggplot2::scale_y_log10(
+    breaks = scales::breaks_log(n = 5),
+    labels = function(x) {
+      sapply(x, function(Value) {
+        if (!is.finite(Value)) {
+          return(NA_character_)
+        }
+        if (Value <= 10) {
+          return(as.character(Value))
+        }
+        exponent <- floor(log10(Value))
+        mantissa <- Value / 10^exponent
+        if (mantissa == 1) {
+          return(paste0("10^", exponent))
+        }
+        paste0(
+          "'", base::formatC(mantissa, format = "f", digits = 1),
+          "' ~ '\u00D7' ~ 10^",
+          exponent
+        )
+      }) |>
+        parse(text = _)
+    }
   )
 
 ggplot2::ggsave(
-  filename = file.path(dir_fig, "MaxAreaRichnessBoxplot_alpha_sensitivity.pdf"),
+  filename = file.path(
+    dir_fig_online,
+    "suppl_files",
+    "MaxAreaRichnessBoxplot_alpha_sensitivity.pdf"
+    ),
   plot = gg_area_comp,
-  width = 10, height = 10
+  width = 180, height = 180, unit = "mm"
 )

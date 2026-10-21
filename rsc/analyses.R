@@ -87,6 +87,7 @@ dir_imeb <- file.path(dir_dat, "biomes", biome_def, "intermediate_data")  # Only
 dir_imed <- file.path(dir_imeb, nativeness_source)  # Patch-level data
 dir_fig <- file.path(dir_main, "fig", nativeness_source)
 dir_tab <- "C:/Users/poppman/Dropbox/Apps/Overleaf/BiomeInvasibility/tab"
+dir_fig_data <- file.path(dir_main, "suppl")
 
 if (!dir.exists(dir_fig)) {
   dir.create(dir_fig, recursive = TRUE)
@@ -193,8 +194,9 @@ if (!dir.exists(dir_imed)) {
 #> Functions
 #<=============================================================================>
 
-## Safe figures
-safe_figure <- function(name, plot, ...) {
+## Save figures and related data
+### Save figure
+save_figure <- function(name, plot, ...) {
   args <- list(...)
   
   do.call(
@@ -222,6 +224,55 @@ safe_figure <- function(name, plot, ...) {
   cat("\nSaved figure to:")
   cat(file.path(dir_fig_online, paste0(name, ".pdf")))
   cat("\n")
+}
+
+### Save data as .csv
+save_figure_data <- function(df, name, item_no, panels, vars = c()) {
+  f_path <- file.path(dir_fig_data, paste0(name, ".csv"))
+  if (length(vars) == 0) {
+    var_desc = c()
+  } else {
+    var_desc <- c(
+      "# Variable descriptions:",
+      base::matrix(vars, ncol = 2, byrow = TRUE) |>
+        base::apply(
+          MARGIN = 1, FUN = function(x) paste("#  ", x[1], "=", x[2])
+          )
+    )
+  }
+  
+  con <- base::file(f_path, open = "wb")
+  
+  # UTF-8 BOM
+  base::writeBin(charToRaw("\ufeff"), con)
+  
+  # Add file header
+  base::writeLines(
+    base::enc2utf8(
+      c(
+        "# Supplementary file to Popp et al.",
+        paste("# Figure number:", item_no),
+        paste("# Panels:", panels),
+        var_desc
+        )
+      ),
+    con,
+    useBytes = TRUE
+  )
+  
+  close(con)
+  base::suppressWarnings(# We are appending a df with column names to a file
+    utils::write.table(
+      x = df,
+      file = f_path,
+      append = TRUE,
+      sep = ",",
+      row.names = FALSE,
+      col.names = TRUE,
+      quote = TRUE,
+      fileEncoding = "UTF-8"
+    )
+  )
 }
 
 ## Ensure fallback operator exists
@@ -908,7 +959,7 @@ gg_sr_comp <- GGally::ggpairs(
 ) +
   ggplot2::theme_bw()
 
-safe_figure("SR_estimate_comparison", plot = gg_sr_comp, width = 7, height = 7)
+save_figure("SR_estimate_comparison", plot = gg_sr_comp, width = 7, height = 7)
 
 cat(
   "\nBreakaway:", length(which(is.finite(gg_sr_df$logSpeciesRichnessBa))),
@@ -1530,7 +1581,7 @@ gg_dr <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
     plot.margin = ggplot2::margin(0, 0, 0, 0)
   )
 
-safe_figure(
+save_figure(
   "SInAS_donors_and_receivers", plot = gg_dr,
   width = 180, height = 210, units = "mm"
   )
@@ -1543,7 +1594,10 @@ polygons_sf$sp_fraction[
   which(polygons_sf$species_count >= polygons_sf$speciesRichnessRaw)
 ] <- NA
 
-gg_dr_norm <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
+sf_plot <- polygons_sf[which(!is.na(polygons_sf$Status)),] %>%
+  dplyr::select(ID, Biome, Status, sp_fraction)
+
+gg_dr_norm <- ggplot2::ggplot(sf_plot) +
   ggplot2::geom_sf(data = biomes, colour = "black", fill = NA) +
   ggplot2::geom_sf(ggplot2::aes(fill = sp_fraction)) +
   ggplot2::facet_wrap(~ Status, nrow = 2) +
@@ -1578,7 +1632,7 @@ gg_dr_norm <- ggplot2::ggplot(polygons_sf[which(!is.na(polygons_sf$Status)),]) +
     plot.margin = ggplot2::margin(0, 0, 0, 0)
   )
 
-safe_figure(
+save_figure(
   "SInAS_donors_and_receivers_norm", plot = gg_dr_norm,
   width = 180, height = 210, units = "mm"
 )
@@ -1641,41 +1695,42 @@ boxplot_data <- merged %>%
       max_richness, max_crichness, max_grichness,
       max_focalECA
       ),
-    names_to = "metric",
-    values_to = "value"
+    names_to = "Metric",
+    values_to = "Value"
   ) %>%
   dplyr::filter(
-    is.finite(value)
+    is.finite(Value)
   ) %>%
-  dplyr::group_by(metric, Species) %>%
+  dplyr::group_by(Metric, Species) %>%
   dplyr::filter(
     all(c("Donor", "Receiver") %in% Status)
   ) %>%
   dplyr::ungroup() %>%
-  dplyr::filter(metric %in% metrics) %>%
+  dplyr::filter(Metric %in% metrics) %>%
   dplyr::mutate(
-    metric = factor(metric)
-  )
+    Metric = factor(Metric)
+  ) %>%
+  dplyr::select("Species", "Status", "Metric", "Value")
 
 # Calculate statistics
 ## Calculate statistics with log-scale aware positioning
 metric_max_values <- boxplot_data %>%
-  dplyr::group_by(metric) %>%
+  dplyr::group_by(Metric) %>%
   dplyr::summarise(
-    max_value = max(value, na.rm = TRUE),
-    log_max_value = log10(max(value, na.rm = TRUE)),
-    place_low = median(log10(value), na.rm = TRUE) > (
-      max(log10(value), na.rm = TRUE) - (
-        max(log10(value), na.rm = TRUE) - min(log10(value), na.rm = TRUE)
+    max_value = max(Value, na.rm = TRUE),
+    log_max_value = log10(max(Value, na.rm = TRUE)),
+    place_low = median(log10(Value), na.rm = TRUE) > (
+      max(log10(Value), na.rm = TRUE) - (
+        max(log10(Value), na.rm = TRUE) - min(log10(Value), na.rm = TRUE)
         ) / 2
       )
   )
 
 ## Wilcoxon test
 test_res <- boxplot_data |>
-  dplyr::group_by(metric) |>
+  dplyr::group_by(Metric) |>
   rstatix::wilcox_test(
-    value ~ Status,
+    Value ~ Status,
     paired = TRUE,
     alternative = "greater",
     p.adjust.method = "BH"
@@ -1684,16 +1739,16 @@ test_res <- boxplot_data |>
 
 ## Effect size
 eff_res <- boxplot_data |>
-  dplyr::group_by(metric) |>
+  dplyr::group_by(Metric) |>
   rstatix::wilcox_effsize(
-    value ~ Status,
+    Value ~ Status,
     paired = TRUE
   )
 
 ## Create stats dataframe - using log-space coordinates
 stats <- test_res %>%
-  dplyr::left_join(eff_res %>% select(metric, effsize), by = "metric") %>%
-  dplyr::left_join(metric_max_values, by = "metric") %>%
+  dplyr::left_join(eff_res %>% select(Metric, effsize), by = "Metric") %>%
+  dplyr::left_join(metric_max_values, by = "Metric") %>%
   dplyr::mutate(
     label = paste0(
       "W\u2009=\u2009", statistic,
@@ -1702,10 +1757,10 @@ stats <- test_res %>%
       "\n", "N\u2009=\u2009", n1
     ),
     y.position = max_value,
-    .y. = "value"
+    .y. = "Value"
   ) %>%
   dplyr::select(
-    metric, group1, group2, statistic, p, effsize, label, y.position, .y.,
+    Metric, group1, group2, statistic, p, effsize, label, y.position, .y.,
     place_low
   ) %>%
   tidyr::pivot_longer(
@@ -1714,7 +1769,7 @@ stats <- test_res %>%
     values_to = "Status"
   ) %>%
   dplyr::mutate(
-    value = y.position,
+    Value = y.position,
     place_low = place_low
     )
 
@@ -1729,7 +1784,7 @@ stats <- test_res %>%
 ## Simple boxplots by Status (facetted by metric)
 gg_area <- ggplot2::ggplot(
   boxplot_data,
-  ggplot2::aes(x = Status, y = value, fill = Status)
+  ggplot2::aes(x = Status, y = Value, fill = Status)
   ) +
   gghalves::geom_half_violin(ggplot2::aes(fill = Status), side = "l") +
   ggplot2::scale_fill_manual(
@@ -1750,7 +1805,7 @@ gg_area <- ggplot2::ggplot(
     values = c("Donor" = "#2E86AB", "Receiver" = "#A23B72")
   ) +
   ggplot2::facet_wrap(
-    ~ metric, scales = "free_y", nrow = 1,
+    ~ Metric, scales = "free_y", nrow = 1,
     labeller = as_labeller(
       c(
         "max_lowland_1e3km2" = "Maximum Lowland Area",
@@ -1780,7 +1835,7 @@ gg_area <- ggplot2::ggplot(
   ggplot2::geom_text(
     data = stats,
     ggplot2::aes(
-      x = 1.5, label = label, vjust = ifelse(place_low, 6.5, 1.5),
+      x = 1.5, label = label, vjust = ifelse(place_low, 3.75, 1.5),
       size = 7
       ),
     size.unit = "pt"
@@ -1790,15 +1845,15 @@ gg_area <- ggplot2::ggplot(
   ggplot2::scale_y_log10(
     breaks = scales::breaks_log(n = 5),
     labels = function(x) {
-      sapply(x, function(value) {
-        if (!is.finite(value)) {
+      sapply(x, function(Value) {
+        if (!is.finite(Value)) {
           return(NA_character_)
         }
-        if (value <= 10) {
-          return(as.character(value))
+        if (Value <= 10) {
+          return(as.character(Value))
         }
-        exponent <- floor(log10(value))
-        mantissa <- value / 10^exponent
+        exponent <- floor(log10(Value))
+        mantissa <- Value / 10^exponent
         if (mantissa == 1) {
           return(paste0("10^", exponent))
         }
@@ -1809,13 +1864,10 @@ gg_area <- ggplot2::ggplot(
         )
       }) |>
         parse(text = _)
-    }#scales::label_scientific()#,
-    # sec.axis = sec_axis(
-    #   ~ ., name = "Estimated species count", breaks = NULL, labels = NULL
-    #   )
+    }
   )
 
-safe_figure(
+save_figure(
   "MaxAreaRichnessBoxplot", plot = gg_area,
   width = 180, height = 73, units = "mm"
 )
@@ -1828,10 +1880,10 @@ labels_map <- data.frame(
 )
 
 labels_boxplot <- data.frame(
-  metric = levels(boxplot_data$metric),
-  Status = sort(boxplot_data$Status)[1:length(levels(boxplot_data$metric))],
+  Metric = levels(boxplot_data$Metric),
+  Status = sort(boxplot_data$Status)[1:length(levels(boxplot_data$Metric))],
   label = letters[
-    1:length(levels(boxplot_data$metric)) + length(unique(polygons_sf$Status))
+    1:length(levels(boxplot_data$Metric)) + length(unique(polygons_sf$Status))
     ]
 )
 gg_a <- gg_dr_norm +
@@ -1861,10 +1913,41 @@ combined <- (gg_a / gg_b) +
     heights = c(0.78, 0.22)
     )
 
-safe_figure(
+
+# Export figure and related data
+save_figure(
   "CombinedBoxplotsAndMap", plot = combined,
   width = 150, height = 210, units = "mm"
 )
+
+save_figure_data(
+  df = as.data.frame(sf::st_drop_geometry(sf_plot)),
+  name = "MapData", item_no = 2, panels = "a–b",
+  vars = c(
+    "ID", "Polygon ID.",
+    "Biome", "Biome name (shortened) following the Olson et al. (2002) https://doi.org/10.1641/0006-3568(2001)051[0933:TEOTWA]2.0.CO;2 classification.",
+    "Status",
+    "Category of potentially invasive species. Donor: Species native to the patch and introduced elsewhere. Receiver: Species not native to the patch.",
+    "sp_fraction",
+    "Observed species within the respective category divided by total number of observed species in the patch."
+    )
+)
+
+save_figure_data(
+  df = boxplot_data, name = "BoxplotData", item_no = 2, panels = "c–e",
+  vars = c(
+    "Species", "Species name following the GBIF taxonomic backbone.",
+    "Status",
+    "Category of potentially invasive species. Donor: Species native to the patch and introduced elsewhere. Receiver: Species not native to the patch.",
+    "Metric",
+    "Metric summarised across all native (Donor) and non-native (Receiver) occupied patches of the species. Descriptions below.",
+    "  max_lowland_1e3km2",
+    "Maximum area across occupied biome patches after removal of mountains in 1000 km2.",
+    "  max_crichness",
+    "Maximum corrected species richnes across occupied biome patches.",
+    "  max_focalECA", "Maximum connected area across occupied biome patches in 1000 km2."
+    )
+  )
 
 
 #>=============================================================================<
@@ -2363,7 +2446,7 @@ for (bi in names(bi_tab)[bi_tab > 10]) {
 }
 
 
-# GAM per biome
+# GLM per biome
 vars <- c(
   "log_focalECA",
   "HumanModification",
@@ -2527,7 +2610,7 @@ for (bi in binames) {
     "\\centering",
     sprintf(
       "\\caption{%s}",
-      paste0(bi, " (\\(D^2\\) = ", sprintf("%.3f", d2_adj_full), ")")
+      paste0(bi, " (\\(D^2_{adj}\\) = ", sprintf("%.3f", d2_adj_full), ")")
       ),
     "\\begin{tabular}{p{4cm}cS[table-format=3.1]S[table-format=1.3]S[table-format=2.2]}",
     "\\toprule",
@@ -2550,23 +2633,26 @@ writeLines(
 # Create plot
 df_stdeff <- dplyr::bind_rows(list_standardised_effects) %>%
   dplyr::mutate(
-    Variable = dplyr::recode(
+    Predictor = dplyr::recode(
       Variable,
       "log_focalECA" = "Connected area",
       "HumanModification" = "Human modification",
       "climateVelocityRank" = "Climate velocity"
     ),
-    Variable = factor(
-      Variable, levels = c("Climate velocity", "Human modification", "Connected area")
+    Predictor = factor(
+      Predictor, levels = c("Climate velocity", "Human modification", "Connected area")
       ),
     significant = ifelse(p_Chisq < 0.05, "Significant", "Not significant")
+  ) %>%
+  dplyr::select(
+    Biome, Predictor, std_estimate, significant
   )
 
-p_effects <- ggplot2::ggplot(
+gg_effects <- ggplot2::ggplot(
   df_stdeff,
   ggplot2::aes(
     x = Biome,
-    y = Variable,
+    y = Predictor,
     fill = std_estimate
   )
 ) +
@@ -2575,7 +2661,7 @@ p_effects <- ggplot2::ggplot(
     pattern_angle = 45,
     pattern_density = 0.45,
     pattern_spacing = 0.1,
-    pattern_colour = "white",
+    pattern_colour = NA,
     pattern_fill = "white",
     colour = NA,
     linewidth = 1.5
@@ -2597,7 +2683,7 @@ p_effects <- ggplot2::ggplot(
   ) +
   ggplot2::theme_minimal(base_size = 7) +
   ggplot2::theme(
-    legend.position = "bottom",
+    legend.position = "top",
     panel.grid = ggplot2::element_blank(),
     axis.text.x = ggplot2::element_text(angle = 45, hjust = 1, size = 7),
     axis.text.y = element_text(size = 7),
@@ -2607,10 +2693,24 @@ p_effects <- ggplot2::ggplot(
     plot.margin = margin(2, 2, 2, 2)
   )
 
-safe_figure(
+# Export figure and data
+save_figure(
   name = "StandardisedEffects",
-  plot = p_effects,
+  plot = gg_effects,
   width = 88, height = 75, unit = "mm"
+  )
+
+save_figure_data(
+  df = df_stdeff,
+  name = "EffectsGLMData",
+  item_no = 3,
+  panels = "single panel",
+  vars = c(
+    "Biome", "Biome name (shortened) following the Olson et al. (2002) https://doi.org/10.1641/0006-3568(2001)051[0933:TEOTWA]2.0.CO;2 classification.",
+    "Predictor", "Predictor name.",
+    "std_estimate", "GLM estimate standardised by multiplication with one standard deviation of predictor values.",
+    "significant", "Significance of the effect based on a likelyhood-ratio test at a p-value threshold of 0.05."
+    )
   )
 
 
@@ -3040,7 +3140,7 @@ if (
       method = "color", type = "upper",
       tl.col = "black", tl.cex = 0.7, cl.cex = 0.7,
       order = "hclust",
-      col = RColorBrewer::brewer.pal(n = 8, name = "RdBu")
+      col = rev(RColorBrewer::brewer.pal(n = 8, name = "RdBu"))
     )
   dev.off()
 }
@@ -3319,7 +3419,7 @@ gg_pie <- ggplot2::ggplot() +
     legend.spacing.y = ggplot2::unit(1, "pt")
     )
 
-safe_figure(
+save_figure(
   "PermutationImportanceD2Pie",
   plot = gg_pie,
   width = 88, height = 88, units = "mm"
@@ -3548,7 +3648,7 @@ gg_combined <- gg_shares + gg_increments +
     tag_suffix = ""
   )
 
-safe_figure(
+save_figure(
   "CommonalityAnalysis",
   plot = gg_combined,
   width = 160, height = 110, units = "mm"
@@ -4010,7 +4110,7 @@ combined_responses <- cowplot::plot_grid(
   align = "h"
 )
 
-safe_figure(
+save_figure(
   "CombinedResponsesPartitioning",
   plot = combined_responses,
   width = 180,

@@ -294,6 +294,7 @@ r2_tab_ctnt <- df_long %>%
   dplyr::group_by(Method, Continent) %>%
   dplyr::summarise(
     r2 = summary(lm(Estimate ~ GIFT))$r.squared,
+    N = dplyr::n(),
     .groups = "drop"
   )
 
@@ -321,13 +322,13 @@ continent_best_mean_r2 <- r2_tab_ctnt %>%
   dplyr::filter(meanR2 == max(meanR2)) %>%
   dplyr::pull(Method)
 
-overall_highest <- r2_tab_ctnt[r2_tab_ctnt$Method == continent_best_mean_rho,]
-
 continent_best_mean_rho <- spearman_tab_ctnt %>%
   dplyr::group_by(Method) %>%
   dplyr::summarise(meanrho = mean(rho)) %>%
   dplyr::filter(meanrho == max(meanrho)) %>%
   dplyr::pull(Method)
+
+overall_highest <- r2_tab_ctnt[r2_tab_ctnt$Method == continent_best_mean_rho,]
 
 df_long <- df_long %>%
   dplyr::group_by(Method) %>%
