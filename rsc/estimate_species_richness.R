@@ -1,5 +1,11 @@
 lud11 <- ifelse(Sys.info()["sysname"] == "Windows", "L:", "/lud11")
-#install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+# install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+# if (!requireNamespace("BiocManager", quietly = TRUE)) {
+#   install.packages("BiocManager")
+# }
+# 
+# BiocManager::install("phyloseq")
+# pak::pak("adw96/breakaway")
 library("rsdd") 
 library("dplyr")
 library("tidyr")

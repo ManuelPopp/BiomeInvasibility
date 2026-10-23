@@ -1,6 +1,12 @@
 lud11 <- ifelse(Sys.info()["sysname"] == "Windows", "L:", "/lud11")
-#install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
-library("rsdd") 
+# install.packages(file.path(lud11, "nobis", "Manuel", "rsdd_0.2.10.tar.gz"))
+# if (!requireNamespace("BiocManager", quietly = TRUE)) {
+#   install.packages("BiocManager")
+# }
+# 
+# BiocManager::install("phyloseq")
+# pak::pak("adw96/breakaway")
+library("rsdd")
 library("dplyr")
 library("tidyr")
 library("terra")
@@ -88,11 +94,14 @@ get_cluster_species_richness <- function(
     biome_id,
     biome_vect = bbuff, maxdist = half_decay_distance
     ) {
-  buffered_patch <- terra::buffer(biome_vect[biome_id, ], width = maxdist)
-  biome_ids <- which(
-    terra::relate(buffered_patch, biome_vect, "intersects")[1, ] &
-      biome_vect$BIOME == buffered_patch$BIOME
-    )
+  row_idx <- match(biome_id, biome_vect$ID)
+  if (is.na(row_idx)) {
+    stop(paste("Biome ID not found:", biome_id))
+  }
+  buffered_patch <- terra::buffer(biome_vect[row_idx, ], width = maxdist)
+  same_biome <- biome_vect$BIOME == buffered_patch$BIOME[1]
+  intersects <- terra::relate(buffered_patch, biome_vect, "intersects")[1, ]
+  biome_ids <- which(overlaps & same_biome)
   sub_tab <- freq_tab[freq_tab$biomeID %in% biome_ids, ]
   
   if (nrow(sub_tab) == 0) {
@@ -123,7 +132,13 @@ get_cluster_species_richness <- function(
   
   baway <- tryCatch(
     breakaway::breakaway(obs_counts),
-    error = function(e) list(est = NA, se = NA)
+    error = function(e) {
+      warning(
+        "breakaway failed for biome ID ", biome_id,
+        ": ", conditionMessage(e)
+      )
+      list(est = NA, se = NA)
+    }
   )
   
   df <- data.frame(

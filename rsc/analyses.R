@@ -4065,7 +4065,7 @@ p_focal_faceted <- ggplot2::ggplot(
       dplyr::summarise(x = min(x, na.rm = TRUE), .groups = "drop") %>%
       dplyr::mutate(
         y = 0.98,
-        label = letters[seq_len(n())]
+        label = letters[seq_len(n()) + 1]
       ),
     ggplot2::aes(
       x = -Inf,
@@ -4093,16 +4093,17 @@ p_focal_faceted <- ggplot2::ggplot(
 
 # Create combined plot
 combined_responses <- cowplot::plot_grid(
-  p_focal_faceted,
   gg_pie,
+  p_focal_faceted,
   nrow = 1,
   rel_heights = c(1, 1),
-  labels = c(
-    "",
-    letters[
-      length(unique(df_focal$predictor)) * length(unique(df_focal$Biome)) + 1
-      ]
-    ),
+#  labels = c(
+#    "",
+#    letters[
+#      length(unique(df_focal$predictor)) * length(unique(df_focal$Biome)) + 1
+#      ]
+#    ),
+  labels = c("a", ""),
   label_size = 7,
   label_fontface = "bold",
   hjust = -5,
