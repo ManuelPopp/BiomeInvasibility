@@ -101,7 +101,7 @@ get_cluster_species_richness <- function(
   buffered_patch <- terra::buffer(biome_vect[row_idx, ], width = maxdist)
   same_biome <- biome_vect$BIOME == buffered_patch$BIOME[1]
   intersects <- terra::relate(buffered_patch, biome_vect, "intersects")[1, ]
-  biome_ids <- which(overlaps & same_biome)
+  biome_ids <- which(intersects & same_biome)
   sub_tab <- freq_tab[freq_tab$biomeID %in% biome_ids, ]
   
   if (nrow(sub_tab) == 0) {
